@@ -1,0 +1,33 @@
+{% load static %}
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#2563eb">
+
+    <title>{% block title %}VirtuGadget{% endblock %}</title>
+    <meta name="description" content="{% block meta_description %}Compare Amazon and Flipkart prices on VirtuGadget.{% endblock %}">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/output.css' %}">
+
+    {% block extra_head %}{% endblock %}
+  </head>
+  <body class="flex min-h-full flex-col bg-white font-sans text-slate-900">
+    <header class="bg-white">
+      {% include "components/topbar.html" %}
+      {% include "components/navbar.html" %}
+    </header>
+
+    <main id="main-content" class="flex-1">
+      {% block content %}{% endblock %}
+    </main>
+
+    {% include "components/footer.html" %}
+
+    {% block extra_body %}{% endblock %}
+  </body>
+</html>
