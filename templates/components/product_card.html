@@ -1,0 +1,17 @@
+<article class="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+  <div class="flex aspect-square items-center justify-center bg-blue-50 text-sm font-bold text-blue-700">Image</div>
+  <div class="p-5">
+    <h3 class="text-base font-bold text-slate-950">{{ title }}</h3>
+    <dl class="mt-4 space-y-2 text-sm">
+      <div class="flex items-center justify-between gap-3">
+        <dt class="text-slate-600">Amazon</dt>
+        <dd class="font-bold {{ amazon_class }}">{{ amazon_price }}</dd>
+      </div>
+      <div class="flex items-center justify-between gap-3">
+        <dt class="text-slate-600">Flipkart</dt>
+        <dd class="font-bold {{ flipkart_class }}">{{ flipkart_price }}</dd>
+      </div>
+    </dl>
+    <a href="#" class="mt-5 inline-flex w-full items-center justify-center rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">View Deal</a>
+  </div>
+</article>

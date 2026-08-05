@@ -1,0 +1,78 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}VirtuGadget | Compare Amazon and Flipkart Prices{% endblock %}
+{% block meta_description %}Find the best price before you buy with VirtuGadget, a modern price comparison platform for Amazon and Flipkart deals.{% endblock %}
+
+{% block content %}
+  <section class="border-b border-blue-100 bg-white">
+    <div class="mx-auto max-w-7xl px-4 py-14 sm:px-6 sm:py-18 lg:px-8 lg:py-24">
+      <div class="mx-auto max-w-4xl text-center">
+        <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Smart shopping starts here</p>
+        <h1 class="mt-4 text-4xl font-extrabold tracking-normal text-slate-950 sm:text-5xl lg:text-6xl">
+          Find the Best Price Before You Buy
+        </h1>
+        <p class="mx-auto mt-5 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">
+          Compare Amazon and Flipkart prices instantly.
+        </p>
+
+        <form id="site-search" class="mx-auto mt-8 max-w-3xl" action="#" method="get" role="search">
+          <label for="homepage-search" class="sr-only">Search products</label>
+          <div class="flex flex-col gap-3 rounded-2xl border border-blue-100 bg-white p-3 shadow-lg shadow-blue-100/70 sm:flex-row sm:items-center">
+            <div class="flex min-h-12 flex-1 items-center gap-3 rounded-xl bg-slate-50 px-4">
+              <svg class="h-5 w-5 text-blue-700" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+              </svg>
+              <input id="homepage-search" name="q" type="search" placeholder="Search mobiles, laptops, headphones..." class="min-h-12 w-full bg-transparent text-base text-slate-900 outline-none placeholder:text-slate-500">
+            </div>
+            <button type="submit" class="inline-flex min-h-12 items-center justify-center rounded-xl bg-blue-700 px-6 text-sm font-bold text-white shadow-sm transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
+              Search
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section class="bg-white">
+    <div class="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Featured Categories</p>
+          <h2 class="mt-2 text-2xl font-extrabold tracking-normal text-slate-950 sm:text-3xl">Shop by category</h2>
+        </div>
+      </div>
+
+      <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {% include "components/category_card.html" with initial="M" title="Mobiles" description="Compare smartphones and daily price drops." %}
+        {% include "components/category_card.html" with initial="L" title="Laptops" description="Find better prices on work and gaming laptops." %}
+        {% include "components/category_card.html" with initial="A" title="Accessories" description="Track deals on chargers, audio, and storage." %}
+        {% include "components/category_card.html" with initial="G" title="Gaming" description="Compare consoles, controllers, and gaming gear." %}
+      </div>
+    </div>
+  </section>
+
+  <section class="border-t border-blue-100 bg-slate-50">
+    <div class="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Latest Products</p>
+          <h2 class="mt-2 text-2xl font-extrabold tracking-normal text-slate-950 sm:text-3xl">Fresh price comparisons</h2>
+        </div>
+        <a href="#" class="inline-flex w-fit items-center justify-center rounded-md border border-blue-100 bg-white px-4 py-2 text-sm font-bold text-blue-700 shadow-sm transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
+          View all
+        </a>
+      </div>
+
+      <div class="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        {% include "components/product_card.html" with title="Samsung Galaxy M Series" amazon_price="Rs. 14,999" flipkart_price="Rs. 14,499" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
+        {% include "components/product_card.html" with title="Apple iPhone 15" amazon_price="Rs. 67,999" flipkart_price="Rs. 68,499" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
+        {% include "components/product_card.html" with title="HP Pavilion Laptop" amazon_price="Rs. 54,990" flipkart_price="Rs. 53,490" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
+        {% include "components/product_card.html" with title="boAt Airdopes Pro" amazon_price="Rs. 1,499" flipkart_price="Rs. 1,599" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
+        {% include "components/product_card.html" with title="Lenovo Gaming Mouse" amazon_price="Rs. 899" flipkart_price="Rs. 799" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
+        {% include "components/product_card.html" with title="Titan Smart Watch" amazon_price="Rs. 4,299" flipkart_price="Rs. 4,499" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
+        {% include "components/product_card.html" with title="Noise Wireless Headset" amazon_price="Rs. 2,199" flipkart_price="Rs. 2,049" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
+        {% include "components/product_card.html" with title="Lakme Beauty Combo" amazon_price="Rs. 699" flipkart_price="Rs. 749" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
+      </div>
+    </div>
+  </section>
+{% endblock %}
