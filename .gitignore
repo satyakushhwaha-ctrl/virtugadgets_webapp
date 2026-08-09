@@ -1,16 +1,25 @@
-.venv/
-node_modules/
-.env
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
+# Virtual Environment
+.venv/
+
+# Environment
+.env
+
+# Django
 db.sqlite3
-
 media/
-
 staticfiles/
 
-.idea/
-.vscode/
-
+# macOS
 .DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Node
+node_modules/

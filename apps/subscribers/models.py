@@ -1,6 +1,13 @@
 import uuid
 
+from django.core.validators import RegexValidator
 from django.db import models
+
+
+phone_validator = RegexValidator(
+    regex=r"^\+?[1-9]\d{9,14}$",
+    message="Enter a valid phone number.",
+)
 
 
 class Subscriber(models.Model):
@@ -12,7 +19,12 @@ class Subscriber(models.Model):
     )
     name = models.CharField(max_length=120, blank=True, verbose_name="Name")
     email = models.EmailField(unique=True, verbose_name="Email address")
-    phone = models.CharField(max_length=20, blank=True, verbose_name="Phone number")
+    phone = models.CharField(
+        max_length=15,
+        unique=True,
+        validators=[phone_validator],
+        verbose_name="Phone number",
+    )
     is_active = models.BooleanField(
         default=True,
         db_index=True,

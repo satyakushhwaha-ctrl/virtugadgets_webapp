@@ -1,15 +1,31 @@
-<div class="border-b border-blue-100 bg-blue-700 text-white">
-  <div class="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
-    <a href="/" class="inline-flex w-fit rounded-md text-xl font-extrabold tracking-normal text-white transition hover:text-blue-50 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2 focus:ring-offset-blue-700">
-      VirtuGadget
-    </a>
+<div class="border-b border-brand-100 bg-white">
+  <div class="mx-auto grid max-w-7xl grid-cols-1 gap-4 px-4 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,36rem)_minmax(0,1fr)] lg:items-center lg:px-8">
+    <div class="justify-self-start">
+      {% include "components/logo.html" with href="/" %}
+    </div>
 
-    <p class="text-sm font-semibold text-blue-50 sm:text-center">
-      Compare Amazon &amp; Flipkart Prices
-    </p>
+    <form action="{% url 'search' %}" method="get" role="search" class="w-full lg:justify-self-center">
+      <label for="header-search" class="sr-only">Search products</label>
+      <div class="flex min-h-11 items-center gap-2 rounded-xl border border-brand-100 bg-slate-50 px-3 shadow-sm transition focus-within:border-brand-500 focus-within:bg-white focus-within:ring-2 focus-within:ring-brand-100">
+        <svg class="h-5 w-5 shrink-0 text-brand-600" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+        </svg>
+        <input id="header-search" name="q" type="search" placeholder="Search products, brands or categories..." class="min-w-0 flex-1 bg-transparent px-1 text-sm text-slate-900 outline-none placeholder:text-slate-400" autocomplete="off">
+        <button type="reset" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500" aria-label="Clear search">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+        </button>
+        <button type="submit" class="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg bg-brand-600 px-3 text-sm font-semibold text-white transition hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2" aria-label="Search products">
+          <span class="hidden sm:inline">Search</span>
+          <svg class="h-4 w-4 sm:hidden" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+          </svg>
+        </button>
+      </div>
+    </form>
 
-    <a href="#" class="inline-flex w-fit items-center justify-center rounded-md bg-white px-4 py-2 text-sm font-bold text-blue-700 shadow-sm transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2 focus:ring-offset-blue-700">
+    <button type="button" data-subscribe-open class="inline-flex min-h-10 w-fit items-center justify-center gap-2 rounded-xl border border-brand-200 bg-white px-4 text-sm font-bold text-brand-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 lg:justify-self-end">
+      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"></path></svg>
       Subscribe
-    </a>
+    </button>
   </div>
 </div>

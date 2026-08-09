@@ -13,6 +13,7 @@ Fields
 - slug
 - icon
 - description
+- display_order
 - is_active
 - created_at
 - updated_at

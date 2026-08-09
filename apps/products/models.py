@@ -8,6 +8,11 @@ from django.db.models import Q
 from apps.categories.models import Category
 
 
+class ProductQuerySet(models.QuerySet):
+    def public(self) -> "ProductQuerySet":
+        return self.filter(is_active=True, category__is_active=True)
+
+
 class Product(models.Model):
     id = models.UUIDField(
         primary_key=True,
@@ -64,6 +69,8 @@ class Product(models.Model):
         verbose_name="Created at",
     )
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Updated at")
+
+    objects = ProductQuerySet.as_manager()
 
     class Meta:
         verbose_name = "Product"

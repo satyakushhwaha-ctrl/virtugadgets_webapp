@@ -5,9 +5,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#2563eb">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232563eb'/%3E%3Cpath d='M36 8 16 36h14l-4 20 22-32H34z' fill='white'/%3E%3C/svg%3E">
 
-    <title>{% block title %}VirtuGadget{% endblock %}</title>
-    <meta name="description" content="{% block meta_description %}Compare Amazon and Flipkart prices on VirtuGadget.{% endblock %}">
+    <title>{% block title %}VirtuGadgets{% endblock %}</title>
+    <meta name="description" content="{% block meta_description %}Compare Amazon and Flipkart prices on VirtuGadgets.{% endblock %}">
+    {% block canonical %}{% endblock %}
+    {% block social_meta %}{% endblock %}
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,7 +20,7 @@
     {% block extra_head %}{% endblock %}
   </head>
   <body class="flex min-h-full flex-col bg-white font-sans text-slate-900">
-    <header class="bg-white">
+    <header class="sticky top-0 z-50 border-b border-brand-100 bg-white/95 shadow-sm backdrop-blur">
       {% include "components/topbar.html" %}
       {% include "components/navbar.html" %}
     </header>
@@ -27,7 +30,9 @@
     </main>
 
     {% include "components/footer.html" %}
+    {% include "components/subscribe_modal.html" %}
 
+    <script src="{% static 'js/subscribe.js' %}" defer></script>
     {% block extra_body %}{% endblock %}
   </body>
 </html>

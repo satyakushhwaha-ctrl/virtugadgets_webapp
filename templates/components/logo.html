@@ -1,0 +1,14 @@
+{% load static %}
+
+{% if href %}<a href="{{ href }}" class="group inline-flex min-w-0 items-center gap-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2">{% endif %}
+  <span class="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl shadow-sm">
+    <!-- <svg class="h-6 w-6 text-white" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M13.2 2 5 13.3h5.7L9.7 22l9.1-12.7h-5.6L13.2 2Z"></path>
+    </svg> -->
+    <img src="{% static 'images/logo.png' %}" alt="" width="40" height="40" class="absolute inset-0 h-full w-full object-contain" loading="eager">
+  </span>
+  <span class="min-w-0">
+    <span class="block truncate text-lg font-extrabold tracking-tight text-slate-950">VirtuGadgets</span>
+    <span class="block truncate text-xs font-medium text-slate-500">Compare Smart. Save More.</span>
+  </span>
+{% if href %}</a>{% endif %}

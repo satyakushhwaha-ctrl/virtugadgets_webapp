@@ -1,8 +1,8 @@
-# VirtuGadget
+# VirtuGadgets
 
 ## Project
 
-VirtuGadget is a modern price comparison platform for Indian eCommerce websites.
+VirtuGadgets is a modern price comparison platform for Indian eCommerce websites.
 
 Users can compare prices from Amazon and Flipkart before making a purchase.
 

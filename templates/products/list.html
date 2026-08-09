@@ -1,0 +1,138 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}
+  {% if current_category %}
+    {{ current_category.name }} | VirtuGadgets
+  {% else %}
+    All Products | VirtuGadgets
+  {% endif %}
+{% endblock %}
+
+{% block meta_description %}
+  {% if current_category %}
+    Browse {{ current_category.name }} products and compare Amazon and Flipkart prices.
+  {% else %}
+    Browse all products and compare Amazon and Flipkart prices on VirtuGadgets.
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+  <section class="border-b border-brand-100 bg-white">
+    <div class="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          {% if current_category %}
+            <p class="text-sm font-bold uppercase tracking-wide text-brand-600">Category</p>
+            <h1 class="mt-2 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-3xl">
+              {{ current_category.name }}
+            </h1>
+            <p class="mt-2 text-sm text-slate-600">{{ current_category.description }}</p>
+          {% else %}
+            <p class="text-sm font-bold uppercase tracking-wide text-brand-600">All Products</p>
+            <h1 class="mt-2 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-3xl">
+              Browse all products
+            </h1>
+            <p class="mt-2 text-sm text-slate-600">Compare prices across Amazon and Flipkart.</p>
+          {% endif %}
+        </div>
+        <a href="{% url 'product-list' %}" class="btn-secondary whitespace-nowrap self-start sm:self-end">
+          {% if current_category %}
+            View all categories
+          {% else %}
+            Clear filter
+          {% endif %}
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14M12 5l7 7-7 7"></path>
+          </svg>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="bg-white">
+    <div class="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+      <div id="products-grid" class="grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:grid-cols-4">
+        {% for product_card in product_cards %}
+          {% include "components/product_card.html" with product=product_card %}
+        {% empty %}
+          <div class="col-span-full empty-state">
+            <div class="empty-state-icon">
+              <svg class="h-8 w-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <div class="empty-state-content">
+              <h3 class="empty-state-title">
+                {% if current_category %}
+                  No products found in this category
+                {% else %}
+                  No products available
+                {% endif %}
+              </h3>
+              <p class="empty-state-description">
+                {% if current_category %}
+                  Check back soon for new products in {{ current_category.name }}.
+                {% else %}
+                  Check back soon for new products.
+                {% endif %}
+              </p>
+            </div>
+            {% if current_category %}
+              <a href="{% url 'product-list' %}" class="btn-primary mt-4 w-fit">
+                Browse All Products
+              </a>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+
+      {% if is_paginated %}
+        <nav class="mt-10 flex items-center justify-center gap-2" aria-label="Pagination">
+          {% if page_obj.has_previous %}
+            <a href="?{% if current_category %}category={{ current_category.slug }}&{% endif %}page={{ page_obj.previous_page_number }}" class="btn-secondary" aria-label="Previous page">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6"></path>
+              </svg>
+              <span class="hidden sm:inline">Previous</span>
+            </a>
+          {% else %}
+            <button type="button" class="btn-secondary opacity-50 cursor-not-allowed" disabled aria-label="Previous page">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6"></path>
+              </svg>
+              <span class="hidden sm:inline">Previous</span>
+            </button>
+          {% endif %}
+
+          <div class="flex items-center gap-1" role="group" aria-label="Page numbers">
+            {% for num in paginator.page_range %}
+              {% if page_obj.number == num %}
+                <span class="btn-primary" aria-current="page">{{ num }}</span>
+              {% elif num > page_obj.number|add:"-3" and num < page_obj.number|add:"3" %}
+                <a href="?{% if current_category %}category={{ current_category.slug }}&{% endif %}page={{ num }}" class="btn-secondary">{{ num }}</a>
+              {% elif num == page_obj.number|add:"-3" or num == page_obj.number|add:"3" %}
+                <span class="px-3 text-slate-400">…</span>
+              {% endif %}
+            {% endfor %}
+          </div>
+
+          {% if page_obj.has_next %}
+            <a href="?{% if current_category %}category={{ current_category.slug }}&{% endif %}page={{ page_obj.next_page_number }}" class="btn-secondary" aria-label="Next page">
+              <span class="hidden sm:inline">Next</span>
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 6l6 6-6 6"></path>
+              </svg>
+            </a>
+          {% else %}
+            <button type="button" class="btn-secondary opacity-50 cursor-not-allowed" disabled aria-label="Next page">
+              <span class="hidden sm:inline">Next</span>
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 6l6 6-6 6"></path>
+              </svg>
+            </button>
+          {% endif %}
+        </nav>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}

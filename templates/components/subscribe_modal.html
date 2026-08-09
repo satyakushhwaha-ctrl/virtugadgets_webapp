@@ -1,0 +1,46 @@
+<div data-subscribe-toast hidden class="fixed right-4 top-4 z-[70] max-w-sm rounded-2xl border border-blue-100 bg-white px-5 py-4 text-sm font-semibold text-slate-900 shadow-xl shadow-blue-100" role="status" aria-live="polite"></div>
+
+<div data-subscribe-dialog hidden class="fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-labelledby="subscribe-dialog-title">
+  <button type="button" data-subscribe-close class="absolute inset-0 h-full w-full cursor-default bg-slate-950/50" aria-label="Close subscribe dialog"></button>
+
+  <div class="flex min-h-full items-end justify-center px-4 py-6 sm:items-center">
+    <div class="relative w-full max-w-lg rounded-2xl border border-blue-100 bg-white p-6 shadow-2xl shadow-blue-950/20 sm:p-8">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Price drop alerts</p>
+          <h2 id="subscribe-dialog-title" class="mt-2 text-2xl font-extrabold tracking-normal text-slate-950">Subscribe for Price Alerts</h2>
+          <p class="mt-2 text-sm leading-6 text-slate-600">Get notified when prices drop on Amazon and Flipkart.</p>
+        </div>
+        <button type="button" data-subscribe-close class="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-blue-100 text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2" aria-label="Close subscribe dialog">
+          <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+          </svg>
+        </button>
+      </div>
+
+      <form data-subscribe-form action="{% url 'subscribers:subscribe' %}" method="post" class="mt-6 space-y-4" novalidate>
+        {% csrf_token %}
+        <div>
+          <label for="subscribe-name" class="text-sm font-bold text-slate-950">Name</label>
+          <input id="subscribe-name" name="name" type="text" autocomplete="name" required class="mt-2 min-h-12 w-full rounded-xl border border-blue-100 bg-white px-4 text-base text-slate-950 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" placeholder="Your name">
+        </div>
+
+        <div>
+          <label for="subscribe-email" class="text-sm font-bold text-slate-950">Email</label>
+          <input id="subscribe-email" name="email" type="email" autocomplete="email" required class="mt-2 min-h-12 w-full rounded-xl border border-blue-100 bg-white px-4 text-base text-slate-950 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" placeholder="you@example.com">
+        </div>
+
+        <div>
+          <label for="subscribe-phone" class="text-sm font-bold text-slate-950">Phone Number</label>
+          <input id="subscribe-phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" pattern="^\+?[0-9\s-]{10,18}$" required class="mt-2 min-h-12 w-full rounded-xl border border-blue-100 bg-white px-4 text-base text-slate-950 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-2 focus:ring-blue-100" placeholder="9876543210">
+        </div>
+
+        <div data-subscribe-error hidden class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert"></div>
+
+        <button type="submit" class="inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-blue-700 px-5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
+          Subscribe
+        </button>
+      </form>
+    </div>
+  </div>
+</div>

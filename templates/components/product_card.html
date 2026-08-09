@@ -1,17 +1,72 @@
-<article class="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
-  <div class="flex aspect-square items-center justify-center bg-blue-50 text-sm font-bold text-blue-700">Image</div>
-  <div class="p-5">
-    <h3 class="text-base font-bold text-slate-950">{{ title }}</h3>
-    <dl class="mt-4 space-y-2 text-sm">
-      <div class="flex items-center justify-between gap-3">
-        <dt class="text-slate-600">Amazon</dt>
-        <dd class="font-bold {{ amazon_class }}">{{ amazon_price }}</dd>
+<article class="card group flex h-full flex-col" data-product-card>
+  <div class="product-image-wrapper flex h-40 items-center justify-center overflow-hidden bg-slate-100 p-4 aspect-auto md:h-[220px]">
+    {% if product.image_url %}
+      <img
+        src="{{ product.image_url }}"
+        alt=""
+        class="product-image h-full w-full object-contain group-hover:scale-100"
+        loading="lazy"
+        width="400"
+        height="400"
+      >
+    {% else %}
+      <div class="product-placeholder" aria-hidden="true">
+        <span>{{ product.brand }}</span>
       </div>
-      <div class="flex items-center justify-between gap-3">
-        <dt class="text-slate-600">Flipkart</dt>
-        <dd class="font-bold {{ flipkart_class }}">{{ flipkart_price }}</dd>
+    {% endif %}
+    {% if product.is_amazon_lowest or product.is_flipkart_lowest %}
+      <div class="absolute left-2 top-2 z-10 badge-lowest shadow-md sm:left-3 sm:top-3">
+        <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+          <path d="M12 2L13.09 8.26L19.57 8.26L14.42 12.18L15.5 18.54L12 15.18L8.5 18.54L9.58 12.18L4.43 8.26L10.91 8.26L12 2Z" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+        <span>Best Deal</span>
+      </div>
+    {% endif %}
+  </div>
+  <div class="flex flex-1 flex-col justify-between space-y-3 p-4 sm:space-y-4 sm:p-5">
+    <div class="flex min-w-0 items-center justify-between gap-2">
+      <p class="min-w-0 flex-1 truncate whitespace-nowrap text-xs font-semibold uppercase tracking-wider text-brand-600">{{ product.brand }}</p>
+      <span class="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-success-50 px-1.5 py-0.5 text-[9px] font-bold text-success-700 sm:text-[10px]">
+        <svg class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>
+        Trusted Seller
+      </span>
+    </div>
+    <h3 class="text-base font-bold leading-6 text-slate-950 line-clamp-2 min-h-[3rem]">{% if product.highlighted_title %}{{ product.highlighted_title|safe }}{% else %}{{ product.title }}{% endif %}</h3>
+    <dl class="space-y-1.5 text-xs sm:space-y-2.5 sm:text-sm" aria-label="Price comparison">
+      <div class="price-row min-h-8 gap-1 sm:min-h-10">
+        <dt class="price-label shrink-0 text-[11px] sm:text-sm">Amazon</dt>
+        <dd class="price-value ml-auto min-w-0 gap-1 whitespace-nowrap text-[11px] sm:gap-2 sm:text-sm {% if product.is_amazon_lowest %}price-value-lowest{% endif %}">
+          <span class="shrink-0">{{ product.amazon_price }}</span>
+          {% if product.is_amazon_lowest %}
+            <span class="badge-lowest shrink-0 gap-0.5 px-1 py-0.5 text-[9px] sm:text-[10px]">
+              <svg class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>
+              <span>Lowest</span>
+            </span>
+          {% endif %}
+        </dd>
+      </div>
+      <div class="price-row min-h-8 gap-1 sm:min-h-10">
+        <dt class="price-label shrink-0 text-[11px] sm:text-sm">Flipkart</dt>
+        <dd class="price-value ml-auto min-w-0 gap-1 whitespace-nowrap text-[11px] sm:gap-2 sm:text-sm {% if product.is_flipkart_lowest %}price-value-lowest{% endif %}">
+          <span class="shrink-0">{{ product.flipkart_price }}</span>
+          {% if product.is_flipkart_lowest %}
+            <span class="badge-lowest shrink-0 gap-0.5 px-1 py-0.5 text-[9px] sm:text-[10px]">
+              <svg class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>
+              <span>Lowest</span>
+            </span>
+          {% endif %}
+        </dd>
       </div>
     </dl>
-    <a href="#" class="mt-5 inline-flex w-full items-center justify-center rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">View Deal</a>
+    <a
+      href="{{ product.details_url }}"
+      class="btn-primary mt-auto w-full px-2 py-2.5 text-xs sm:px-6 sm:py-3 sm:text-sm group-hover:shadow-lg group-hover:-translate-y-0.5"
+      aria-label="View details for {{ product.title }}"
+    >
+      View Details
+      <svg class="h-4 w-4 transition-transform group-hover:translate-x-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 12h14M12 5l7 7-7 7"></path>
+      </svg>
+    </a>
   </div>
 </article>

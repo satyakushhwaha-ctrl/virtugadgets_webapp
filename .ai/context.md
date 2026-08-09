@@ -1,6 +1,6 @@
 Project
 
-VirtuGadget
+VirtuGadgets
 
 Price Comparison Website
 

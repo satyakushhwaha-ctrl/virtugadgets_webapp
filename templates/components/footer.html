@@ -1,14 +1,15 @@
-<footer class="border-t border-blue-100 bg-slate-50">
+<footer class="border-t border-slate-200 bg-slate-50">
   <div class="mx-auto grid max-w-7xl gap-8 px-4 py-10 sm:px-6 md:grid-cols-3 lg:px-8">
     <section aria-labelledby="footer-about">
-      <h2 id="footer-about" class="text-sm font-bold uppercase tracking-normal text-slate-950">About</h2>
+      <h2 id="footer-about" class="sr-only">About VirtuGadgets</h2>
+      {% include "components/logo.html" with href="/" %}
       <p class="mt-3 max-w-sm text-sm leading-6 text-slate-600">
-        VirtuGadget helps shoppers compare prices across leading marketplaces with a fast, clean browsing experience.
+        Compare Amazon and Flipkart prices in one clear, trusted shopping experience.
       </p>
     </section>
 
     <section aria-labelledby="footer-categories">
-      <h2 id="footer-categories" class="text-sm font-bold uppercase tracking-normal text-slate-950">Categories</h2>
+      <h2 id="footer-categories" class="text-sm font-bold uppercase tracking-wider text-slate-950">Categories</h2>
       <nav class="mt-3 flex flex-col gap-2 text-sm text-slate-600" aria-label="Footer categories">
         <a href="#" class="w-fit rounded-md transition hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">Mobiles</a>
         <a href="#" class="w-fit rounded-md transition hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">Laptops</a>
@@ -20,19 +21,22 @@
     </section>
 
     <section aria-labelledby="footer-links">
-      <h2 id="footer-links" class="text-sm font-bold uppercase tracking-normal text-slate-950">Quick Links</h2>
+      <h2 id="footer-links" class="text-sm font-bold uppercase tracking-wider text-slate-950">Quick Links</h2>
       <nav class="mt-3 flex flex-col gap-2 text-sm text-slate-600" aria-label="Footer quick links">
         <a href="/" class="w-fit rounded-md transition hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">Home</a>
-        <a href="#" class="w-fit rounded-md transition hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">Subscribe</a>
-        <a href="#" class="w-fit rounded-md transition hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">Privacy</a>
-        <a href="#" class="w-fit rounded-md transition hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">Contact</a>
+        <a href="/products/" class="w-fit rounded-md transition hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-600 focus:ring-offset-2">Products</a>
+        <a href="/products/" class="w-fit rounded-md transition hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-600 focus:ring-offset-2">Categories</a>
+        <a href="#footer-about" class="w-fit rounded-md transition hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-600 focus:ring-offset-2">About</a>
+        <a href="#" class="w-fit rounded-md transition hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-600 focus:ring-offset-2">Privacy Policy</a>
+        <a href="#" class="w-fit rounded-md transition hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-600 focus:ring-offset-2">Terms</a>
+        <a href="#" class="w-fit rounded-md transition hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-600 focus:ring-offset-2">Contact</a>
       </nav>
     </section>
   </div>
 
-  <div class="border-t border-blue-100">
+  <div class="border-t border-slate-200">
     <div class="mx-auto max-w-7xl px-4 py-5 text-sm text-slate-600 sm:px-6 lg:px-8">
-      <p>&copy; {% now "Y" %} VirtuGadget. All rights reserved.</p>
+      <p>&copy; {% now "Y" %} VirtuGadgets. All rights reserved.</p>
     </div>
   </div>
 </footer>

@@ -1,7 +1,20 @@
-<article class="rounded-2xl border border-blue-100 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
-  <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-700">
-    <span class="text-lg font-extrabold">{{ initial }}</span>
+<a href="{% url 'product-list' %}?category={{ category.slug }}" class="card card-interactive group flex h-full min-w-0 flex-col p-3 sm:p-4" data-category-card>
+  <div class="relative mb-3 sm:mb-4">
+    <div class="category-icon relative h-12 w-12 shrink-0 overflow-hidden rounded-xl group-hover:scale-110 group-hover:bg-brand-100">
+      {% include "components/category_icon.html" with icon_name=category.icon %}
+      {% if category.product_count %}
+        <span class="absolute -bottom-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-600 px-1.5 text-[10px] font-bold text-white shadow-md">
+          {{ category.product_count }}
+        </span>
+      {% endif %}
+    </div>
   </div>
-  <h3 class="mt-5 text-lg font-bold text-slate-950">{{ title }}</h3>
-  <p class="mt-2 text-sm leading-6 text-slate-600">{{ description }}</p>
-</article>
+  <h3 class="text-base font-bold leading-6 text-slate-950 transition-colors group-hover:text-brand-600 sm:text-lg">{{ category.name }}</h3>
+  <p class="mt-1.5 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-slate-600 sm:mt-2 sm:min-h-[3rem] sm:text-sm sm:leading-6">{{ category.description }}</p>
+  <div class="mt-auto flex items-center justify-between gap-2 border-t border-brand-100 pt-2.5 sm:mt-3 sm:pt-3">
+    <span class="truncate text-xs font-medium text-brand-600 sm:text-sm">{{ category.product_count }} products</span>
+    <svg class="h-5 w-5 flex-shrink-0 text-brand-300 group-hover:text-brand-600 group-hover:translate-x-1 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M5 12h14M12 5l7 7-7 7"></path>
+    </svg>
+  </div>
+</a>

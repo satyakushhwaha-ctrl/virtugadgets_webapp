@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html
 
 from apps.products.models import Product, ProductPrice
 
@@ -20,6 +21,7 @@ class ProductPriceInline(admin.TabularInline):
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = (
+        "image_preview",
         "title",
         "category",
         "brand",
@@ -31,11 +33,22 @@ class ProductAdmin(admin.ModelAdmin):
     list_filter = ("is_active", "category", "brand", "created_at", "updated_at")
     search_fields = ("title", "slug", "brand", "short_description", "description")
     ordering = ("title",)
-    readonly_fields = ("id", "created_at", "updated_at")
+    readonly_fields = ("id", "image_preview", "created_at", "updated_at")
     prepopulated_fields = {"slug": ("title",)}
     autocomplete_fields = ("category",)
     list_select_related = ("category",)
     inlines = (ProductPriceInline,)
+
+    @admin.display(description="Image")
+    def image_preview(self, obj: Product) -> str:
+        if not obj.featured_image:
+            return "-"
+
+        return format_html(
+            '<img src="{}" alt="{}" width="48" height="48" />',
+            obj.featured_image.url,
+            obj.title,
+        )
 
 
 @admin.register(ProductPrice)

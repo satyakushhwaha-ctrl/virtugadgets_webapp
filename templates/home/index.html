@@ -1,77 +1,145 @@
 {% extends "layouts/base.html" %}
 
-{% block title %}VirtuGadget | Compare Amazon and Flipkart Prices{% endblock %}
-{% block meta_description %}Find the best price before you buy with VirtuGadget, a modern price comparison platform for Amazon and Flipkart deals.{% endblock %}
+{% block title %}VirtuGadgets | Compare Amazon and Flipkart Prices{% endblock %}
+{% block meta_description %}Find the best price before you buy with VirtuGadgets, a modern price comparison platform for Amazon and Flipkart deals.{% endblock %}
 
 {% block content %}
-  <section class="border-b border-blue-100 bg-white">
-    <div class="mx-auto max-w-7xl px-4 py-14 sm:px-6 sm:py-18 lg:px-8 lg:py-24">
-      <div class="mx-auto max-w-4xl text-center">
-        <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Smart shopping starts here</p>
-        <h1 class="mt-4 text-4xl font-extrabold tracking-normal text-slate-950 sm:text-5xl lg:text-6xl">
-          Find the Best Price Before You Buy
+  <!-- Hero Section -->
+  <section class="relative overflow-hidden border-b border-brand-100 bg-white">
+    <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-brand-50/50 to-transparent" aria-hidden="true"></div>
+    <div class="relative mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-12 lg:px-8 lg:py-16">
+      <div class="mx-auto max-w-5xl text-center">
+        <div class="animate-fade-in stagger-1 flex justify-center">
+          {% include "components/hero_logo.html" %}
+        </div>
+        <h1 class="animate-slide-up stagger-2 mx-auto mt-6 max-w-4xl text-4xl font-extrabold leading-[1.1] tracking-tight text-slate-950 sm:text-5xl lg:mt-7 lg:text-6xl xl:max-w-none xl:whitespace-nowrap">
+          Compare Prices Before You Buy.
         </h1>
-        <p class="mx-auto mt-5 max-w-2xl text-base leading-7 text-slate-600 sm:text-lg">
-          Compare Amazon and Flipkart prices instantly.
+        <p class="animate-slide-up stagger-3 mx-auto mt-4 max-w-[700px] text-base leading-7 text-slate-600 sm:text-lg">
+          Track and compare prices across Amazon and Flipkart in one place.
         </p>
 
-        <form id="site-search" class="mx-auto mt-8 max-w-3xl" action="#" method="get" role="search">
+        <form id="site-search" class="animate-slide-up stagger-4 mx-auto mt-7 w-full max-w-[800px]" action="{% url 'search' %}" method="get" role="search">
           <label for="homepage-search" class="sr-only">Search products</label>
-          <div class="flex flex-col gap-3 rounded-2xl border border-blue-100 bg-white p-3 shadow-lg shadow-blue-100/70 sm:flex-row sm:items-center">
-            <div class="flex min-h-12 flex-1 items-center gap-3 rounded-xl bg-slate-50 px-4">
-              <svg class="h-5 w-5 text-blue-700" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <div class="flex flex-col gap-2 rounded-2xl border border-brand-100 bg-white p-2 shadow-xl shadow-brand-100/50 transition-all duration-300 focus-within:ring-2 focus-within:ring-brand-500 focus-within:ring-offset-2 sm:flex-row sm:items-center">
+            <div class="flex min-h-14 min-w-0 flex-1 items-center gap-3 rounded-xl bg-slate-50 px-4 sm:min-h-16">
+              <svg class="h-6 w-6 shrink-0 text-brand-600" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
               </svg>
-              <input id="homepage-search" name="q" type="search" placeholder="Search mobiles, laptops, headphones..." class="min-h-12 w-full bg-transparent text-base text-slate-900 outline-none placeholder:text-slate-500">
+              <input id="homepage-search" name="q" type="search" placeholder="Search mobiles, laptops, headphones..." class="input-search min-w-0 flex-1" autocomplete="off">
+              <button type="reset" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white hover:text-slate-700" aria-label="Clear search">
+                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+              </button>
             </div>
-            <button type="submit" class="inline-flex min-h-12 items-center justify-center rounded-xl bg-blue-700 px-6 text-sm font-bold text-white shadow-sm transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
-              Search
+            <button type="submit" class="btn-primary min-h-14 w-full whitespace-nowrap sm:min-h-16 sm:w-auto sm:px-7" aria-label="Search">
+              <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"></path></svg>
+              <span>Search Products</span>
             </button>
           </div>
         </form>
+        <button type="button" data-subscribe-open class="animate-fade-in stagger-5 mt-3 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-brand-200 bg-white px-5 text-sm font-semibold text-brand-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"></path></svg>
+          Subscribe for Price Alerts
+        </button>
+
+        <div class="animate-fade-in stagger-5 mt-6 flex flex-col items-center justify-center gap-3 text-sm text-slate-500 sm:flex-row sm:gap-6">
+          <p class="flex items-center gap-2">
+            <svg class="h-4 w-4 shrink-0 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>
+            Compare Amazon &amp; Flipkart
+          </p>
+          <p class="flex items-center gap-2">
+            <svg class="h-4 w-4 shrink-0 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v6l4 2"></path><circle cx="12" cy="12" r="9"></circle></svg>
+            Updated Daily
+          </p>
+          <p class="flex items-center gap-2">
+            <svg class="h-4 w-4 shrink-0 text-brand-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8.2 7 10 4-1.8 7-5.5 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-4"></path></svg>
+            Trusted Price Comparison
+          </p>
+        </div>
       </div>
     </div>
   </section>
 
-  <section class="bg-white">
-    <div class="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Featured Categories</p>
-          <h2 class="mt-2 text-2xl font-extrabold tracking-normal text-slate-950 sm:text-3xl">Shop by category</h2>
+  <!-- Popular Categories -->
+  <section class="bg-white" aria-labelledby="categories-heading">
+    <div class="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8 lg:py-20">
+      <header class="section-header">
+        <div class="min-w-0 flex-1">
+          <p class="section-label">Popular Categories</p>
+          <h2 id="categories-heading" class="section-title">Browse products by category</h2>
         </div>
-      </div>
-
-      <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {% include "components/category_card.html" with initial="M" title="Mobiles" description="Compare smartphones and daily price drops." %}
-        {% include "components/category_card.html" with initial="L" title="Laptops" description="Find better prices on work and gaming laptops." %}
-        {% include "components/category_card.html" with initial="A" title="Accessories" description="Track deals on chargers, audio, and storage." %}
-        {% include "components/category_card.html" with initial="G" title="Gaming" description="Compare consoles, controllers, and gaming gear." %}
-      </div>
-    </div>
-  </section>
-
-  <section class="border-t border-blue-100 bg-slate-50">
-    <div class="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p class="text-sm font-bold uppercase tracking-normal text-blue-700">Latest Products</p>
-          <h2 class="mt-2 text-2xl font-extrabold tracking-normal text-slate-950 sm:text-3xl">Fresh price comparisons</h2>
-        </div>
-        <a href="#" class="inline-flex w-fit items-center justify-center rounded-md border border-blue-100 bg-white px-4 py-2 text-sm font-bold text-blue-700 shadow-sm transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2">
+        <a href="/categories/" class="btn-secondary whitespace-nowrap">
           View all
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14M12 5l7 7-7 7"></path>
+          </svg>
         </a>
+      </header>
+
+      <div class="mt-8 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:grid-cols-4 xl:grid-cols-5">
+        {% for category in categories %}
+          {% include "components/category_card.html" with category=category %}
+        {% empty %}
+          <div class="col-span-full empty-state">
+            <div class="empty-state-icon">
+              <svg class="h-8 w-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                <path d="M6.5 17H20"></path>
+                <path d="M6.5 17a2.5 2.5 0 0 1 0 5H20"></path>
+              </svg>
+            </div>
+            <div class="empty-state-content">
+              <h3 class="empty-state-title">No categories available</h3>
+              <p class="empty-state-description">Check back soon for new categories.</p>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <!-- Latest Products -->
+  <section class="border-t border-brand-100 bg-slate-50" aria-labelledby="products-heading">
+    <div class="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8 lg:py-20">
+      <header class="section-header">
+        <div class="min-w-0 flex-1">
+          <p class="section-label">Latest Products</p>
+          <h2 id="products-heading" class="section-title">Fresh price comparisons</h2>
+        </div>
+        <a href="/products/" class="btn-secondary whitespace-nowrap">
+          View all
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14M12 5l7 7-7 7"></path>
+          </svg>
+        </a>
+      </header>
+
+      <div class="mt-8 grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:mt-10 lg:grid-cols-4" id="products-grid">
+        {% for product_card in products %}
+          {% include "components/product_card.html" with product=product_card %}
+        {% empty %}
+          <div class="col-span-full empty-state">
+            <div class="empty-state-icon">
+              <svg class="h-8 w-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <div class="empty-state-content">
+              <h3 class="empty-state-title">No products available</h3>
+              <p class="empty-state-description">Check back soon for the latest price comparisons.</p>
+            </div>
+            <a href="/categories/" class="btn-primary mt-4 w-fit">
+              Browse Categories
+            </a>
+          </div>
+        {% endfor %}
       </div>
 
-      <div class="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        {% include "components/product_card.html" with title="Samsung Galaxy M Series" amazon_price="Rs. 14,999" flipkart_price="Rs. 14,499" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
-        {% include "components/product_card.html" with title="Apple iPhone 15" amazon_price="Rs. 67,999" flipkart_price="Rs. 68,499" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
-        {% include "components/product_card.html" with title="HP Pavilion Laptop" amazon_price="Rs. 54,990" flipkart_price="Rs. 53,490" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
-        {% include "components/product_card.html" with title="boAt Airdopes Pro" amazon_price="Rs. 1,499" flipkart_price="Rs. 1,599" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
-        {% include "components/product_card.html" with title="Lenovo Gaming Mouse" amazon_price="Rs. 899" flipkart_price="Rs. 799" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
-        {% include "components/product_card.html" with title="Titan Smart Watch" amazon_price="Rs. 4,299" flipkart_price="Rs. 4,499" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
-        {% include "components/product_card.html" with title="Noise Wireless Headset" amazon_price="Rs. 2,199" flipkart_price="Rs. 2,049" amazon_class="text-slate-950" flipkart_class="text-blue-700" %}
-        {% include "components/product_card.html" with title="Lakme Beauty Combo" amazon_price="Rs. 699" flipkart_price="Rs. 749" amazon_class="text-blue-700" flipkart_class="text-slate-950" %}
+      <!-- Loading skeleton placeholders (shown via JS when loading) -->
+      <div id="products-loading" class="hidden grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 lg:grid-cols-4" aria-live="polite" aria-label="Loading products">
+        {% for i in "12345678" %}
+          {% include "components/product_card_skeleton.html" %}
+        {% endfor %}
       </div>
     </div>
   </section>

@@ -19,6 +19,11 @@ class Category(models.Model):
     )
     icon = models.CharField(max_length=80, blank=True, verbose_name="Icon")
     description = models.TextField(blank=True, verbose_name="Description")
+    display_order = models.PositiveIntegerField(
+        default=0,
+        db_index=True,
+        verbose_name="Display order",
+    )
     is_active = models.BooleanField(
         default=True,
         db_index=True,
@@ -33,9 +38,12 @@ class Category(models.Model):
     class Meta:
         verbose_name = "Category"
         verbose_name_plural = "Categories"
-        ordering = ["name"]
+        ordering = ["display_order", "name"]
         indexes = [
-            models.Index(fields=["is_active", "name"], name="cat_active_name_idx"),
+            models.Index(
+                fields=["is_active", "display_order", "name"],
+                name="cat_nav_order_idx",
+            ),
             models.Index(fields=["created_at"], name="cat_created_at_idx"),
         ]
 
