@@ -1,0 +1,14 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <h1>{{ title }}</h1>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    {% for match in selected_matches %}
+      <input type="hidden" name="_selected_action" value="{{ match.pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="{{ action_name }}">
+    <button type="submit" name="apply_categories" class="default">Save Categories</button>
+  </form>
+{% endblock %}

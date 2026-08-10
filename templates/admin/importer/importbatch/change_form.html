@@ -1,0 +1,12 @@
+{% extends "admin/change_form.html" %}
+
+{% block submit_buttons_bottom %}
+  <div class="submit-row">
+    <input type="submit" name="_run_batch" value="RUN BATCH" class="default">
+    <input type="submit" name="_resume_batch" value="RESUME BATCH">
+    <input type="submit" name="_review_matches" value="REVIEW MATCHES">
+    <input type="submit" name="_publish_approved" value="PUBLISH APPROVED PRODUCTS">
+    <input type="submit" name="_cancel_batch" value="CANCEL BATCH">
+  </div>
+  {{ block.super }}
+{% endblock %}

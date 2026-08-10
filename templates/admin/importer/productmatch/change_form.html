@@ -1,0 +1,9 @@
+{% extends "admin/change_form.html" %}
+
+{% block submit_buttons_bottom %}
+  <div class="submit-row">
+    <input type="submit" name="_save_category" value="Save Category">
+    <input type="submit" name="_publish_product" value="PUBLISH PRODUCT" class="default">
+  </div>
+  {{ block.super }}
+{% endblock %}

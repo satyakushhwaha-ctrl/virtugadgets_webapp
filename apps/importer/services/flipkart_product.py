@@ -1,9 +1,22 @@
 import json
-import os
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
-from playwright.sync_api import sync_playwright
+from urllib.parse import urlparse
+
+try:
+  from pydantic import BaseModel, Field
+  PYDANTIC_AVAILABLE = True
+except ModuleNotFoundError:
+  PYDANTIC_AVAILABLE = False
+
+  class BaseModel:
+    pass
+
+  def Field(default=None, **kwargs):
+    return default
+
+from django.db import transaction
+from django.utils import timezone
+
+from ..models import FlipkartProduct, FlipkartSearchResult, ImportStatus
 
 
 # 1. Pydantic Schema supporting images
@@ -76,6 +89,8 @@ class FlipkartProductSchema(BaseModel):
 
 def fetch_flipkart_page_data_with_playwright(url: str) -> dict:
   """Robust Flipkart scraper capturing DOM details, text blocks, and gallery images."""
+  from playwright.sync_api import sync_playwright
+
   with sync_playwright() as p:
     browser = p.chromium.launch(
         headless=True,
@@ -139,6 +154,14 @@ def fetch_flipkart_page_data_with_playwright(url: str) -> dict:
 
 
 def extract_flipkart_product_data(url: str) -> dict:
+  if not PYDANTIC_AVAILABLE:
+    raise RuntimeError(
+        "Flipkart product extraction requires the pydantic package."
+    )
+
+  from google import genai
+  from google.genai import types
+
   client = genai.Client()
 
   print("Fetching Flipkart webpage details securely via Playwright...")
@@ -174,6 +197,106 @@ def extract_flipkart_product_data(url: str) -> dict:
   )
 
   return json.loads(response.text)
+
+
+def extract_flipkart_product(url: str) -> dict:
+  """Extract and normalize one Flipkart product without saving it."""
+  parsed = urlparse(url or "")
+  if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in {
+      "flipkart.com",
+      "www.flipkart.com",
+  }:
+    raise ValueError("Invalid Flipkart product URL.")
+
+  raw_data = extract_flipkart_product_data(url)
+  if not isinstance(raw_data, dict):
+    raise ValueError("Flipkart product scraper returned invalid data.")
+
+  pricing = raw_data.get("pricing") or {}
+  price_range = pricing.get("selling_price_range_inr") or {}
+  seller_info = raw_data.get("seller_info") or {}
+  specifications = raw_data.get("specifications") or {}
+  design_and_build = raw_data.get("design_and_build") or {}
+  extras = raw_data.get("extras") or {}
+  return {
+      "pid": raw_data.get("pid") or "",
+      "product_title": raw_data.get("product_title") or "",
+      "brand": raw_data.get("brand") or "",
+      "url": raw_data.get("url") or url,
+      "availability": raw_data.get("availability") or "",
+      "images": raw_data.get("images") or [],
+      "mrp_inr": pricing.get("mrp_inr"),
+      "current_selling_price_inr": pricing.get("current_selling_price_inr"),
+      "selling_price_min_inr": price_range.get("min"),
+      "selling_price_max_inr": price_range.get("max"),
+      "discount_percentage": pricing.get("discount_percentage"),
+      "primary_seller": seller_info.get("primary_seller") or "",
+      "seller_rating": seller_info.get("seller_rating"),
+      "processor": specifications.get("processor") or "",
+      "ram": specifications.get("ram") or "",
+      "storage": specifications.get("storage") or "",
+      "operating_system": specifications.get("operating_system") or "",
+      "display_size": specifications.get("display_size") or "",
+      "resolution": specifications.get("resolution") or "",
+      "color": design_and_build.get("color") or "",
+      "weight_kg": design_and_build.get("weight_kg"),
+      "software": extras.get("software") or "",
+      "warranty": extras.get("warranty") or "",
+  }
+
+
+def process_flipkart_search_result(search_result: FlipkartSearchResult) -> bool:
+  """Extract one candidate into staging and mark it processed on success."""
+  try:
+    product = search_result.flipkart_product
+  except FlipkartProduct.DoesNotExist:
+    product = None
+
+  if product and product.status == ImportStatus.COMPLETED:
+    if not search_result.processed:
+      search_result.processed = True
+      search_result.save(update_fields=["processed"])
+    return False
+
+  if product is None:
+    product = FlipkartProduct.objects.create(
+        search_result=search_result,
+        pid=search_result.pid,
+        url=search_result.product_url,
+        status=ImportStatus.PENDING,
+    )
+
+  product.status = ImportStatus.RUNNING
+  product.error_message = ""
+  product.url = search_result.product_url
+  product.save(update_fields=["status", "error_message", "url", "updated_at"])
+
+  try:
+    data = extract_flipkart_product(search_result.product_url)
+    with transaction.atomic():
+      for field in (
+          "product_title", "brand", "url", "availability", "images",
+          "mrp_inr", "current_selling_price_inr", "selling_price_min_inr",
+          "selling_price_max_inr", "discount_percentage", "primary_seller",
+          "seller_rating", "processor", "ram", "storage", "operating_system",
+          "display_size", "resolution", "color", "weight_kg", "software",
+          "warranty",
+      ):
+        setattr(product, field, data.get(field))
+      product.pid = search_result.pid
+      product.status = ImportStatus.COMPLETED
+      product.error_message = ""
+      product.extracted_at = timezone.now()
+      product.save()
+      search_result.processed = True
+      search_result.save(update_fields=["processed"])
+  except Exception as exc:
+    product.status = ImportStatus.FAILED
+    product.error_message = str(exc) or exc.__class__.__name__
+    product.save(update_fields=["status", "error_message", "updated_at"])
+    raise
+
+  return True
 
 
 if __name__ == "__main__":

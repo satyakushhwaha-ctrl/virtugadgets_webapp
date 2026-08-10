@@ -1,17 +1,54 @@
+"""Amazon search scraping service.
+
+This module is deliberately limited to scraping and normalising search data.
+Persistence is handled by the importer command/admin workflow.
+"""
+
 import re
-import time
-import pandas as pd
-from playwright.sync_api import sync_playwright
+from urllib.parse import quote_plus, urljoin, urlparse
+
+from django.core.exceptions import ValidationError
 
 
-SEARCH_URL = "https://www.amazon.in/s?k=laptops&i=computers&crid=1DRNXC0TNI385&sprefix=laptop%2Ccomputers%2C381&ref=nb_sb_noss_2"
+AMAZON_BASE_URL = "https://www.amazon.in"
+SEARCH_URL = f"{AMAZON_BASE_URL}/s?k={{keyword}}"
+ASIN_PATTERN = re.compile(r"(?i)(?:/dp/|/gp/product/|/gp/aw/d/)([A-Z0-9]{10})")
 
 
-def scrape():
+def _normalise_amazon_url(href: str | None, asin: str | None) -> str | None:
+    """Return the canonical Amazon product URL when an ASIN is available."""
+    if asin:
+        return f"{AMAZON_BASE_URL}/dp/{asin.upper()}"
+    if not href:
+        return None
 
-    with sync_playwright() as p:
+    absolute_url = urljoin(AMAZON_BASE_URL, href)
+    parsed = urlparse(absolute_url)
+    if parsed.netloc and not parsed.netloc.lower().endswith("amazon.in"):
+        return None
+    return absolute_url.split("?")[0].split("#")[0]
 
-        browser = p.chromium.launch(
+
+def _extract_asin(asin: str | None, href: str | None) -> str | None:
+    if asin:
+        candidate = asin.strip().upper()
+        if re.fullmatch(r"[A-Z0-9]{10}", candidate):
+            return candidate
+    if href:
+        match = ASIN_PATTERN.search(href)
+        if match:
+            return match.group(1).upper()
+    return None
+
+
+def _scrape_search_results(keyword: str) -> list[dict]:
+    """Scrape Amazon using the project's existing Playwright behaviour."""
+    # Keep Playwright lazy so Django checks and unit tests do not require a
+    # browser installation unless a real search is actually requested.
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
             headless=False,
             slow_mo=100,
             args=[
@@ -21,7 +58,6 @@ def scrape():
                 "--disable-infobars",
             ],
         )
-
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             locale="en-IN",
@@ -32,125 +68,82 @@ def scrape():
                 "Chrome/138.0.0.0 Safari/537.36"
             ),
         )
-
         page = context.new_page()
-
-        page.add_init_script("""
-Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined
-});
-""")
-
-        print("Opening Amazon...")
-
-        page.goto(
-            SEARCH_URL,
-            wait_until="domcontentloaded",
-            timeout=90000,
-        )
-
-        page.wait_for_timeout(6000)
-
-        print("Title:", page.title())
-
-        page.screenshot(
-            path="amazon_search.png",
-            full_page=True,
+        page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', "
+            "{get: () => undefined})"
         )
 
         try:
+            page.goto(
+                SEARCH_URL.format(keyword=quote_plus(keyword)),
+                wait_until="domcontentloaded",
+                timeout=90000,
+            )
+            page.wait_for_timeout(6000)
             page.wait_for_selector(
                 "div[data-component-type='s-search-result']",
                 timeout=30000,
             )
-        except:
-            print("Search results not found.")
-            print("Screenshot saved as amazon_search.png")
-            browser.close()
-            return
 
-        for _ in range(5):
-            page.mouse.wheel(0, 1500)
-            page.wait_for_timeout(800)
+            for _ in range(5):
+                page.mouse.wheel(0, 1500)
+                page.wait_for_timeout(800)
 
-        products = page.locator(
-            "div[data-component-type='s-search-result']"
-        )
-
-        total = products.count()
-
-        print(f"Found {total} products")
-
-        rows = []
-
-        for i in range(total):
-
-            item = products.nth(i)
-
-            try:
-
-                asin = item.get_attribute("data-asin")
-
-                title_locator = item.locator("h2 span")
-
-                title = (
-                    title_locator.first.inner_text().strip()
-                    if title_locator.count()
-                    else None
-                )
-
-                link_locator = item.locator("h2 a")
-
-                href = (
-                    link_locator.first.get_attribute("href")
-                    if link_locator.count()
-                    else None
-                )
-
-                url = None
-
-                if href:
-                    url = "https://www.amazon.in" + href.split("?")[0]
-
-                sponsored = False
-
-                text = item.inner_text().lower()
-
-                if "sponsored" in text:
-                    sponsored = True
-
+            products = page.locator(
+                "div[data-component-type='s-search-result']"
+            )
+            rows = []
+            for index in range(products.count()):
+                item = products.nth(index)
+                item_asin = item.get_attribute("data-asin")
+                link = item.locator("h2 a")
+                href = link.first.get_attribute("href") if link.count() else None
+                title = item.locator("h2 span")
                 rows.append(
                     {
-                        "position": i + 1,
-                        "asin": asin,
-                        "title": title,
-                        "product_url": url,
-                        "sponsored": sponsored,
+                        "asin": item_asin,
+                        "title": (
+                            title.first.inner_text().strip()
+                            if title.count()
+                            else ""
+                        ),
+                        "product_url": href,
+                        "position": index + 1,
+                        "sponsored": "sponsored" in item.inner_text().lower(),
                     }
                 )
+            return rows
+        finally:
+            browser.close()
 
-            except Exception as e:
-                print(e)
 
-        browser.close()
+def search_amazon(keyword: str) -> list[dict]:
+    """Search Amazon and return unique, normalised result dictionaries."""
+    if not isinstance(keyword, str) or not keyword.strip():
+        raise ValidationError("Amazon search keyword cannot be empty.")
 
-        df = pd.DataFrame(rows)
+    normalised_keyword = keyword.strip()
+    results = _scrape_search_results(normalised_keyword)
+    normalised = []
+    seen_asins = set()
 
-        df.to_excel(
-            "amazon_laptops.xlsx",
-            index=False,
+    for result in results:
+        asin = _extract_asin(result.get("asin"), result.get("product_url"))
+        if not asin or asin in seen_asins:
+            continue
+        product_url = _normalise_amazon_url(result.get("product_url"), asin)
+        if not product_url:
+            continue
+        seen_asins.add(asin)
+        normalised.append(
+            {
+                "asin": asin,
+                "title": (result.get("title") or "").strip(),
+                "product_url": product_url,
+                "position": result.get("position") or len(normalised) + 1,
+                "sponsored": bool(result.get("sponsored", False)),
+            }
         )
 
-        print(df.head())
-
-        print()
-
-        print("=" * 80)
-
-        print(f"Saved {len(df)} products")
-
-        print("Output: amazon_laptops.xlsx")
-
-
-if __name__ == "__main__":
-    scrape()
+    return normalised

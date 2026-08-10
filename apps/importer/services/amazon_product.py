@@ -1,10 +1,22 @@
 import json
-import os
 import time
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
-from playwright.sync_api import sync_playwright
+
+try:
+  from pydantic import BaseModel, Field
+  PYDANTIC_AVAILABLE = True
+except ModuleNotFoundError:
+  PYDANTIC_AVAILABLE = False
+
+  class BaseModel:
+    pass
+
+  def Field(default=None, **kwargs):
+    return default
+
+from django.db import transaction
+from django.utils import timezone
+
+from ..models import AmazonProduct, AmazonSearchResult, ImportStatus
 
 
 # 1. Define Pydantic Schema
@@ -77,6 +89,8 @@ class AmazonProductSchema(BaseModel):
 
 def fetch_amazon_page_data_with_playwright(url: str) -> dict:
   """Robust Amazon scraper capturing text block hints and high-res image URLs."""
+  from playwright.sync_api import sync_playwright
+
   with sync_playwright() as p:
     browser = p.chromium.launch(
         headless=True,
@@ -157,6 +171,14 @@ def fetch_amazon_page_data_with_playwright(url: str) -> dict:
 
 
 def extract_amazon_product_data(url: str) -> dict:
+  if not PYDANTIC_AVAILABLE:
+    raise RuntimeError(
+        "Amazon product extraction requires the pydantic package."
+    )
+
+  from google import genai
+  from google.genai import types
+
   client = genai.Client()
 
   print("Fetching Amazon webpage details securely via Playwright...")
@@ -217,6 +239,98 @@ def extract_amazon_product_data(url: str) -> dict:
       "All Gemini models are temporarily busy. Please run the script again in"
       " a moment."
   )
+
+
+def extract_amazon_product(url: str) -> dict:
+  """Extract and normalize one Amazon product without persisting it."""
+  raw_data = extract_amazon_product_data(url)
+  if not isinstance(raw_data, dict):
+    raise ValueError("Amazon product scraper returned invalid data.")
+
+  pricing = raw_data.get("pricing") or {}
+  price_range = pricing.get("selling_price_range_inr") or {}
+  seller_info = raw_data.get("seller_info") or {}
+  specifications = raw_data.get("specifications") or {}
+  design_and_build = raw_data.get("design_and_build") or {}
+  extras = raw_data.get("extras") or {}
+
+  return {
+      "product_title": raw_data.get("product_title") or "",
+      "brand": raw_data.get("brand") or "",
+      "url": raw_data.get("url") or url,
+      "availability": raw_data.get("availability") or "",
+      "images": raw_data.get("images") or [],
+      "mrp_inr": pricing.get("mrp_inr"),
+      "current_selling_price_inr": pricing.get("current_selling_price_inr"),
+      "selling_price_min_inr": price_range.get("min"),
+      "selling_price_max_inr": price_range.get("max"),
+      "discount_percentage": pricing.get("discount_percentage"),
+      "primary_seller": seller_info.get("primary_seller") or "",
+      "seller_rating": seller_info.get("seller_rating"),
+      "processor": specifications.get("processor") or "",
+      "ram": specifications.get("ram") or "",
+      "storage": specifications.get("storage") or "",
+      "operating_system": specifications.get("operating_system") or "",
+      "display_size": specifications.get("display_size") or "",
+      "resolution": specifications.get("resolution") or "",
+      "color": design_and_build.get("color") or "",
+      "weight_kg": design_and_build.get("weight_kg"),
+      "software": extras.get("software") or "",
+      "warranty": extras.get("warranty") or "",
+  }
+
+
+def process_amazon_search_result(search_result: AmazonSearchResult) -> bool:
+  """Extract one search result into staging and mark it processed.
+
+  Returns False when an already completed AmazonProduct was skipped. Any
+  extraction or persistence error is re-raised after recording failure state.
+  """
+  product, _ = AmazonProduct.objects.get_or_create(
+      asin=search_result.asin,
+      defaults={
+          "url": search_result.product_url,
+          "status": ImportStatus.PENDING,
+      },
+  )
+
+  if product.status == ImportStatus.COMPLETED:
+    if not search_result.processed:
+      search_result.processed = True
+      search_result.save(update_fields=["processed"])
+    return False
+
+  product.status = ImportStatus.RUNNING
+  product.error_message = ""
+  product.url = search_result.product_url
+  product.save(update_fields=["status", "error_message", "url", "updated_at"])
+
+  try:
+    data = extract_amazon_product(search_result.product_url)
+    data["asin"] = search_result.asin
+    with transaction.atomic():
+      for field in (
+          "product_title", "brand", "url", "availability", "images",
+          "mrp_inr", "current_selling_price_inr", "selling_price_min_inr",
+          "selling_price_max_inr", "discount_percentage", "primary_seller",
+          "seller_rating", "processor", "ram", "storage", "operating_system",
+          "display_size", "resolution", "color", "weight_kg", "software",
+          "warranty",
+      ):
+        setattr(product, field, data.get(field))
+      product.status = ImportStatus.COMPLETED
+      product.error_message = ""
+      product.extracted_at = timezone.now()
+      product.save()
+      search_result.processed = True
+      search_result.save(update_fields=["processed"])
+  except Exception as exc:
+    product.status = ImportStatus.FAILED
+    product.error_message = str(exc) or exc.__class__.__name__
+    product.save(update_fields=["status", "error_message", "updated_at"])
+    raise
+
+  return True
 
 
 if __name__ == "__main__":
