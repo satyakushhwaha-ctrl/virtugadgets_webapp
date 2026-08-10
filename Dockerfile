@@ -14,6 +14,7 @@ RUN apt-get update \
         ca-certificates \
         xvfb \
         libpq5 \
+        libpq5
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
