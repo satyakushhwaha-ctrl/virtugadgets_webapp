@@ -12,6 +12,7 @@ env = environ.Env(
     DEBUG=(bool, False),
     ALLOWED_HOSTS=(list, []),
     CSRF_TRUSTED_ORIGINS=(list, []),
+    PUBLIC_DOMAINS=(list, ["virtugadgets.in", "www.virtugadgets.in"]),
     DB_PORT=(int, 5432),
 )
 env.read_env(BASE_DIR / ".env")
@@ -20,8 +21,25 @@ env.read_env(BASE_DIR / ".env")
 # Security
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = env.bool("DEBUG")
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
-CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+
+
+def _unique(values):
+    return list(dict.fromkeys(value for value in values if value))
+
+
+configured_allowed_hosts = env.list("ALLOWED_HOSTS")
+configured_csrf_origins = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+public_domains = [domain.strip() for domain in env.list("PUBLIC_DOMAINS")]
+
+if DEBUG:
+    ALLOWED_HOSTS = _unique(configured_allowed_hosts)
+    CSRF_TRUSTED_ORIGINS = _unique(configured_csrf_origins)
+else:
+    ALLOWED_HOSTS = _unique(configured_allowed_hosts + public_domains)
+    CSRF_TRUSTED_ORIGINS = _unique(
+        configured_csrf_origins
+        + [f"https://{domain}" for domain in public_domains]
+    )
 
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
