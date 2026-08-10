@@ -27,9 +27,23 @@ def _unique(values):
     return list(dict.fromkeys(value for value in values if value))
 
 
-configured_allowed_hosts = env.list("ALLOWED_HOSTS")
+def _hostname(value):
+    value = value.strip().rstrip("/")
+    for scheme in ("https://", "http://"):
+        if value.startswith(scheme):
+            value = value[len(scheme):]
+            break
+    return value.split("/", 1)[0]
+
+
+def _https_origin(value):
+    hostname = _hostname(value)
+    return f"https://{hostname}" if hostname else ""
+
+
+configured_allowed_hosts = [_hostname(value) for value in env.list("ALLOWED_HOSTS")]
 configured_csrf_origins = env.list("CSRF_TRUSTED_ORIGINS", default=[])
-public_domains = [domain.strip() for domain in env.list("PUBLIC_DOMAINS")]
+public_domains = [_hostname(domain) for domain in env.list("PUBLIC_DOMAINS")]
 
 if DEBUG:
     ALLOWED_HOSTS = _unique(configured_allowed_hosts)
@@ -37,8 +51,8 @@ if DEBUG:
 else:
     ALLOWED_HOSTS = _unique(configured_allowed_hosts + public_domains)
     CSRF_TRUSTED_ORIGINS = _unique(
-        configured_csrf_origins
-        + [f"https://{domain}" for domain in public_domains]
+        [_https_origin(origin) for origin in configured_csrf_origins]
+        + [_https_origin(domain) for domain in public_domains]
     )
 
 SECURE_CONTENT_TYPE_NOSNIFF = True
