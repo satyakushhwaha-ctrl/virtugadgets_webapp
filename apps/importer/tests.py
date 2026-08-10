@@ -1,3 +1,5 @@
+import os
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1865,3 +1867,61 @@ class ImportBatchTests(TestCase):
             "review_matches_action", "publish_approved_products_action",
         ):
             self.assertIn(action, batch_admin.actions)
+
+
+class AdminProvisioningCommandTests(TestCase):
+    command_environment = {
+        "ADMIN_USERNAME": "railway-admin",
+        "ADMIN_EMAIL": "railway-admin@example.com",
+        "ADMIN_PASSWORD": "A-strong-test-password-123!",
+    }
+
+    def run_provision_command(self, environment):
+        output = StringIO()
+        with patch.dict(os.environ, environment, clear=True):
+            call_command("provision_admin", stdout=output)
+        return output.getvalue()
+
+    def test_missing_environment_variables_does_not_create_user(self):
+        output = self.run_provision_command({})
+
+        self.assertFalse(get_user_model().objects.exists())
+        self.assertIn("provisioning skipped", output)
+
+    def test_provisioning_requires_all_environment_variables(self):
+        output = self.run_provision_command(
+            {
+                "ADMIN_USERNAME": self.command_environment["ADMIN_USERNAME"],
+                "ADMIN_EMAIL": self.command_environment["ADMIN_EMAIL"],
+            }
+        )
+
+        self.assertFalse(get_user_model().objects.exists())
+        self.assertIn("ADMIN_PASSWORD", output)
+
+    def test_provisioning_creates_superuser_without_logging_password(self):
+        output = self.run_provision_command(self.command_environment)
+
+        user = get_user_model().objects.get(username="railway-admin")
+        self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.check_password(self.command_environment["ADMIN_PASSWORD"]))
+        self.assertNotIn(self.command_environment["ADMIN_PASSWORD"], output)
+
+    def test_existing_user_is_not_modified_or_recreated(self):
+        user_model = get_user_model()
+        user = user_model.objects.create_user(
+            username="railway-admin",
+            email="original@example.com",
+            password="Original-password-123!",
+        )
+        original_password_hash = user.password
+
+        output = self.run_provision_command(self.command_environment)
+
+        user.refresh_from_db()
+        self.assertEqual(user.pk, user_model.objects.get(username="railway-admin").pk)
+        self.assertEqual(user.email, "original@example.com")
+        self.assertEqual(user.password, original_password_hash)
+        self.assertFalse(user.is_staff)
+        self.assertIn("already exists", output)
