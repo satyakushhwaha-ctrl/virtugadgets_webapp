@@ -77,7 +77,7 @@ def _scrape_search_results(keyword: str) -> list[dict]:
         try:
             page.goto(
                 SEARCH_URL.format(keyword=quote_plus(keyword)),
-                wait_until="domcontentloaded",
+                wait_until="commit",
                 timeout=90000,
             )
             page.wait_for_timeout(6000)
