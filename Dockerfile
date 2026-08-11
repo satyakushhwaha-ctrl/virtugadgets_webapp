@@ -7,36 +7,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System dependencies + Node.js
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        curl \
-        ca-certificates \
-        xvfb \
-        libpq5 \
-        libpq5
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python dependencies
 COPY requirements.txt ./
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xvfb \
+        xauth \
+        libpq5 \
+    && pip install --no-cache-dir -r requirements.txt \
+    && python -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
-# Node dependencies
-COPY package.json package-lock.json ./
-
-RUN npm ci
-
-# Install Playwright Chromium + required system dependencies
-RUN python -m playwright install --with-deps chromium
-
-# Application source
 COPY . .
-
-# Build Tailwind CSS
-RUN npm run build:css
 
 EXPOSE 8000
 
