@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import environ
@@ -20,7 +21,7 @@ env.read_env(BASE_DIR / ".env")
 
 # Security
 SECRET_KEY = env("SECRET_KEY")
-DEBUG = env.bool("DEBUG")
+DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
 
 
 def _unique(values):
