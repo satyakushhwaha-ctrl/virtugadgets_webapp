@@ -1,1 +1,103 @@
 @import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-300: #93c5fd;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+  --color-brand-800: #1e40af;
+
+  --color-success-50: #ecfdf5;
+  --color-success-700: #15803d;
+}
+
+@layer components {
+  .page-container {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+  }
+
+  .section-header {
+    @apply flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between;
+  }
+
+  .section-label {
+    @apply text-sm font-bold uppercase tracking-wider text-brand-600;
+  }
+
+  .section-title {
+    @apply mt-2 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-3xl;
+  }
+
+  .card {
+    @apply min-w-0 w-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm;
+  }
+
+  .card-interactive {
+    @apply transition duration-200 hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-lg;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-brand-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2;
+  }
+
+  .badge-lowest {
+    @apply inline-flex items-center rounded-full bg-success-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-success-700;
+  }
+
+  .price-row {
+    @apply flex items-center rounded-xl bg-slate-50 px-3 py-2;
+  }
+
+  .price-label {
+    @apply font-medium text-slate-500;
+  }
+
+  .price-value {
+    @apply flex items-center font-semibold text-slate-950;
+  }
+
+  .price-value-lowest {
+    @apply text-success-700;
+  }
+
+  .product-placeholder {
+    @apply flex h-full w-full items-center justify-center rounded-2xl bg-brand-50 px-4 text-center text-sm font-semibold text-brand-700;
+  }
+
+  .category-icon {
+    @apply flex items-center justify-center bg-brand-50 text-brand-600 transition;
+  }
+
+  .empty-state {
+    @apply flex min-h-[20rem] flex-col items-center justify-center rounded-3xl border border-dashed border-brand-200 bg-white px-6 py-10 text-center;
+  }
+
+  .empty-state-icon {
+    @apply flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-50 text-brand-600;
+  }
+
+  .empty-state-content {
+    @apply mt-4 max-w-lg;
+  }
+
+  .empty-state-title {
+    @apply text-xl font-bold text-slate-950;
+  }
+
+  .empty-state-description {
+    @apply mt-2 text-sm leading-6 text-slate-600;
+  }
+
+  .input-search {
+    @apply bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400 sm:text-base;
+  }
+}

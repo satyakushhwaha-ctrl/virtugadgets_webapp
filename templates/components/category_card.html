@@ -1,4 +1,4 @@
-<a href="{% url 'product-list' %}?category={{ category.slug }}" class="card card-interactive group flex h-full min-w-0 flex-col p-3 sm:p-4" data-category-card>
+<a href="{% url 'product-list' %}?category={{ category.slug }}" class="card card-interactive group flex h-full min-w-0 w-full flex-col p-3 sm:p-4" data-category-card>
   <div class="relative mb-3 sm:mb-4">
     <div class="category-icon relative h-12 w-12 shrink-0 overflow-hidden rounded-xl group-hover:scale-110 group-hover:bg-brand-100">
       {% include "components/category_icon.html" with icon_name=category.icon %}

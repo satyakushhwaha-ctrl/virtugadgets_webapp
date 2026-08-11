@@ -1,5 +1,5 @@
-<article class="card group flex h-full flex-col" data-product-card>
-  <div class="product-image-wrapper flex h-40 items-center justify-center overflow-hidden bg-slate-100 p-4 aspect-auto md:h-[220px]">
+<article class="card group flex h-full min-w-0 w-full flex-col" data-product-card>
+  <div class="product-image-wrapper relative flex h-40 items-center justify-center overflow-hidden bg-slate-100 p-4 sm:h-44 md:h-[220px]">
     {% if product.image_url %}
       <img
         src="{{ product.image_url }}"
@@ -31,7 +31,7 @@
         Trusted Seller
       </span>
     </div>
-    <h3 class="text-base font-bold leading-6 text-slate-950 line-clamp-2 min-h-[3rem]">{% if product.highlighted_title %}{{ product.highlighted_title|safe }}{% else %}{{ product.title }}{% endif %}</h3>
+    <h3 class="min-h-[3rem] text-base font-bold leading-6 text-slate-950 line-clamp-2">{% if product.highlighted_title %}{{ product.highlighted_title|safe }}{% else %}{{ product.title }}{% endif %}</h3>
     <dl class="space-y-1.5 text-xs sm:space-y-2.5 sm:text-sm" aria-label="Price comparison">
       <div class="price-row min-h-8 gap-1 sm:min-h-10">
         <dt class="price-label shrink-0 text-[11px] sm:text-sm">Amazon</dt>
