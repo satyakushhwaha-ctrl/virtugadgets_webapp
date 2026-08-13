@@ -19,6 +19,10 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.urls import include, path
 
+admin.site.site_header = "VirtuGadgets Administration"
+admin.site.site_title = "VirtuGadgets Admin"
+admin.site.index_title = "VirtuGadgets Administration"
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", include("apps.core.urls")),
