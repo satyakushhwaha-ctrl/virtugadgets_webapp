@@ -1,0 +1,27 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+
+    <p>{{ selection_label|default:"Selected products" }}:</p>
+    <ul>
+      {% for product in selected_products %}
+        <li>
+          {% if product.asin %}{{ product.asin }}{% else %}{{ product.pid }}{% endif %}
+          — {{ product.product_title }}
+        </li>
+      {% endfor %}
+    </ul>
+
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="ids" value="{{ selected_ids }}">
+      {{ form.as_p }}
+      <div class="submit-row">
+        <a href="{% url 'admin:importer_amazonproduct_changelist' %}" class="button cancel-link">Cancel</a>
+        <input type="submit" value="Assign Categories" class="default">
+      </div>
+    </form>
+  </div>
+{% endblock %}

@@ -32,8 +32,8 @@
       <div class="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2 lg:gap-8">
         <div class="order-1 lg:col-start-1 lg:row-span-2 lg:row-start-1">
           <div class="card flex min-h-[20rem] items-center justify-center overflow-hidden bg-slate-100 p-6 sm:min-h-[28rem] sm:p-10">
-            {% if product.featured_image %}
-              <img src="{{ product.featured_image.url }}" alt="{{ product.title }}" class="h-full max-h-[28rem] w-full object-contain" width="800" height="800">
+            {% if image_url %}
+              <img src="{{ image_url }}" alt="{{ product.title }}" class="h-full max-h-[28rem] w-full object-contain" width="800" height="800">
             {% else %}
               <div class="flex h-full min-h-[18rem] w-full flex-col items-center justify-center gap-3 text-brand-600" role="img" aria-label="No image available for {{ product.title }}">
                 <svg class="h-16 w-16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

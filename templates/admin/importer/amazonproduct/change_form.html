@@ -1,0 +1,24 @@
+{% extends "admin/change_form.html" %}
+
+{% block submit_buttons_bottom %}
+  {{ block.super }}
+  <div class="submit-row">
+    {% if original.approval_status != "approved" %}
+      <input type="submit" name="_approve_product" value="Approve">
+    {% endif %}
+    {% if original.approval_status == "approved" and not original.published %}
+      <input type="submit" name="_publish_product" value="Publish" class="default">
+    {% endif %}
+    {% if original.published %}
+      <input type="submit" name="_unpublish_product" value="Unpublish">
+    {% endif %}
+  </div>
+  <fieldset class="module aligned">
+    <h2>Search Flipkart</h2>
+    <div class="form-row">
+      <label for="id_flipkart_keyword">Keyword:</label>
+      <input type="text" id="id_flipkart_keyword" name="flipkart_keyword" placeholder="Enter a Flipkart search keyword">
+      <input type="submit" name="_search_flipkart_keyword" value="Search Flipkart">
+    </div>
+  </fieldset>
+{% endblock %}

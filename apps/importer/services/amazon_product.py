@@ -281,24 +281,17 @@ def extract_amazon_product(url: str) -> dict:
 
 
 def process_amazon_search_result(search_result: AmazonSearchResult) -> bool:
-  """Extract one search result into staging and mark it processed.
-
-  Returns False when an already completed AmazonProduct was skipped. Any
-  extraction or persistence error is re-raised after recording failure state.
-  """
+  """Extract one search result and upsert its ASIN marketplace record."""
+  asin = (search_result.asin or "").strip().upper()
+  if not asin:
+    raise ValueError("Amazon search result is missing an ASIN.")
   product, _ = AmazonProduct.objects.get_or_create(
-      asin=search_result.asin,
+      asin=asin,
       defaults={
           "url": search_result.product_url,
           "status": ImportStatus.PENDING,
       },
   )
-
-  if product.status == ImportStatus.COMPLETED:
-    if not search_result.processed:
-      search_result.processed = True
-      search_result.save(update_fields=["processed"])
-    return False
 
   product.status = ImportStatus.RUNNING
   product.error_message = ""
@@ -307,7 +300,7 @@ def process_amazon_search_result(search_result: AmazonSearchResult) -> bool:
 
   try:
     data = extract_amazon_product(search_result.product_url)
-    data["asin"] = search_result.asin
+    data["asin"] = asin
     with transaction.atomic():
       for field in (
           "product_title", "brand", "url", "availability", "images",

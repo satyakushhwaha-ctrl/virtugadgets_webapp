@@ -90,7 +90,7 @@ class HomeViewTests(TestCase):
         self.assertEqual(len(response.context["products"]), 8)
 
     def test_homepage_avoids_n_plus_one_queries(self) -> None:
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(6):
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)

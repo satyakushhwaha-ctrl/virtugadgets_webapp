@@ -1,7 +1,9 @@
 from django.contrib import admin, messages
 from django import forms
+from django.db import models
+from django.db.models import Q
 from django.http import HttpResponseRedirect
-from django.urls import reverse
+from django.urls import path, reverse
 from django.template.response import TemplateResponse
 from django.utils import timezone
 from django.utils.html import format_html
@@ -22,10 +24,30 @@ from .models import (
 from .services.amazon_search_results import run_amazon_search_for_keyword
 from .services.amazon_product import process_amazon_search_result
 from .services.flipkart_product import process_flipkart_search_result
-from .services.flipkart_search_results import search_and_save_flipkart_candidates
-from .services.product_matching import extract_model_identity, match_products
+from .services.flipkart_search_results import (
+    run_flipkart_search_for_keyword,
+    search_and_save_flipkart_candidates_for_amazon_product,
+    search_and_save_flipkart_candidates,
+)
+from .services.product_matching import (
+    extract_model_identity,
+    first_valid_image_url,
+    match_products,
+)
 from .services.product_matching import run_product_matching_for_keyword
-from .services.product_publisher import publish_product_match
+from .services.product_publisher import (
+    PublishValidationError,
+    approve_amazon_product,
+    publish_amazon_product,
+    publish_product_match,
+    unpublish_amazon_product,
+    approve_flipkart_product,
+    associate_flipkart_product,
+    publish_flipkart_product,
+    unpublish_flipkart_product,
+    assign_amazon_product_categories,
+    assign_staged_product_categories,
+)
 from .services.batch_runner import cancel_batch, publish_approved_products, run_batch
 
 
@@ -63,6 +85,18 @@ class ProductMatchAdminForm(forms.ModelForm):
             ).order_by("display_order", "name")
 
 
+class AmazonProductAdminForm(forms.ModelForm):
+    class Meta:
+        model = AmazonProduct
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["categories"].queryset = Category.objects.filter(
+            is_active=True,
+        ).order_by("display_order", "name")
+
+
 class AssignPublishCategoriesForm(forms.Form):
     categories = forms.ModelMultipleChoiceField(
         queryset=Category.objects.filter(is_active=True).order_by("display_order", "name"),
@@ -84,6 +118,124 @@ class PublishedProductFilter(admin.SimpleListFilter):
         if self.value() == "no":
             return queryset.exclude(match_status="published")
         return queryset
+
+
+def _completed_amazon_products_for_keyword(search_keyword):
+    return AmazonProduct.objects.filter(
+        asin__in=search_keyword.amazon_results.values("asin"),
+        status=ImportStatus.COMPLETED,
+    )
+
+
+def _flipkart_results_for_keyword(search_keyword):
+    """Return all FlipkartSearchResults for a keyword, including both
+    keyword-level (direct) and product-level (via AmazonProduct) results."""
+    amazon_asins = search_keyword.amazon_results.values("asin")
+    return FlipkartSearchResult.objects.filter(
+        models.Q(search_keyword=search_keyword) |
+        models.Q(amazon_product__asin__in=amazon_asins)
+    ).distinct()
+
+
+def _latest_flipkart_search_batch_for_keyword(search_keyword):
+    return search_keyword.import_batches.filter(
+        Q(status=BatchStatus.FLIPKART_SEARCH)
+        | Q(error_message__icontains="Flipkart search")
+        | Q(amazon_products_count__gt=0)
+        | Q(flipkart_results_count__gt=0),
+    ).order_by("-created_at").first()
+
+
+def _flipkart_search_status_for_keyword(search_keyword):
+    latest_batch = _latest_flipkart_search_batch_for_keyword(search_keyword)
+    if latest_batch and latest_batch.status == BatchStatus.FLIPKART_SEARCH:
+        return ImportStatus.RUNNING
+    if latest_batch and latest_batch.status == BatchStatus.FAILED:
+        return ImportStatus.FAILED
+    if latest_batch and latest_batch.status == BatchStatus.COMPLETED:
+        return ImportStatus.COMPLETED
+
+    completed_products = _completed_amazon_products_for_keyword(search_keyword)
+    total_products = completed_products.count()
+    if not total_products:
+        return ImportStatus.PENDING
+
+    if (
+        latest_batch
+        and latest_batch.status == BatchStatus.FAILED
+        and "flipkart search" in latest_batch.error_message.lower()
+    ):
+        return ImportStatus.FAILED
+
+    if latest_batch and latest_batch.successful_count + latest_batch.failed_count >= total_products:
+        return ImportStatus.COMPLETED
+
+    searched_products = _flipkart_search_progress_for_keyword(search_keyword)[0]
+
+    if searched_products == 0:
+        return ImportStatus.PENDING
+    if searched_products < total_products:
+        return ImportStatus.RUNNING
+    return ImportStatus.COMPLETED
+
+
+def _flipkart_search_progress_for_keyword(search_keyword):
+    latest_batch = _latest_flipkart_search_batch_for_keyword(search_keyword)
+    if latest_batch:
+        total_products = latest_batch.amazon_products_count
+        searched_products = min(
+            latest_batch.successful_count + latest_batch.failed_count,
+            total_products,
+        )
+        candidate_count = latest_batch.flipkart_results_count
+        return searched_products, total_products, candidate_count
+
+    completed_products = _completed_amazon_products_for_keyword(search_keyword)
+    total_products = completed_products.count()
+
+    # Count keyword-level results (no amazon_product) as searched
+    keyword_level_results = FlipkartSearchResult.objects.filter(
+        search_keyword=search_keyword,
+        amazon_product__isnull=True,
+    ).count()
+
+    # Count product-level results (have amazon_product)
+    product_level_results = FlipkartSearchResult.objects.filter(
+        amazon_product__in=completed_products,
+    ).count()
+
+    candidate_count = keyword_level_results + product_level_results
+
+    # For searched_products, keyword-level counts as 1 "product searched" if any exist
+    # Product-level counts distinct amazon_products that have results
+    searched_products = 0
+    if keyword_level_results > 0:
+        searched_products += 1
+    searched_products += FlipkartSearchResult.objects.filter(
+        amazon_product__in=completed_products,
+    ).values("amazon_product_id").distinct().count()
+
+    return searched_products, total_products, candidate_count
+
+
+class FlipkartSearchStatusFilter(admin.SimpleListFilter):
+    title = "Flipkart Search"
+    parameter_name = "flipkart_search_status"
+
+    def lookups(self, request, model_admin):
+        return ImportStatus.choices
+
+    def queryset(self, request, queryset):
+        selected = self.value()
+        if not selected:
+            return queryset
+
+        matching_ids = [
+            keyword.pk
+            for keyword in queryset.iterator()
+            if _flipkart_search_status_for_keyword(keyword) == selected
+        ]
+        return queryset.filter(pk__in=matching_ids)
 
 
 @admin.register(ImportBatch)
@@ -243,20 +395,19 @@ class SearchKeywordAdmin(admin.ModelAdmin):
         "total_results",
         "amazon_extraction_summary",
         "flipkart_search_summary",
+        "total_flipkart_results",
         "product_matching_summary",
         "matching_phase_status",
         "created_at",
         "updated_at",
     )
     search_fields = ("keyword",)
-    list_filter = ("status", "matching_status")
+    list_filter = ("status", FlipkartSearchStatusFilter, "matching_status")
     ordering = ("-created_at",)
-    actions = ("run_amazon_search", "run_product_matching")
+    actions = ("run_amazon_search", "run_flipkart_search", "run_product_matching")
 
     def _amazon_products(self, obj):
-        return AmazonProduct.objects.filter(
-            asin__in=obj.amazon_results.values("asin"),
-        )
+        return AmazonProduct.objects.filter(asin__in=obj.amazon_results.values("asin"))
 
     @admin.display(description="Amazon extraction")
     def amazon_extraction_summary(self, obj):
@@ -270,21 +421,13 @@ class SearchKeywordAdmin(admin.ModelAdmin):
 
     @admin.display(description="Flipkart search")
     def flipkart_search_summary(self, obj):
-        candidates = FlipkartSearchResult.objects.filter(
-            amazon_product__in=self._amazon_products(obj),
-        )
-        products_searched = candidates.values("amazon_product_id").distinct().count()
-        candidate_count = candidates.count()
-        total_products = self._amazon_products(obj).filter(status="completed").count()
-        if not total_products:
-            status = "Waiting for Amazon products"
-        elif products_searched == total_products:
-            status = "Completed"
-        elif products_searched:
-            status = "In progress"
-        else:
-            status = "Pending"
+        products_searched, total_products, candidate_count = _flipkart_search_progress_for_keyword(obj)
+        status = _flipkart_search_status_for_keyword(obj).label
         return f"{products_searched}/{total_products} searched · {candidate_count} candidates · {status}"
+
+    @admin.display(description="Total Flipkart results")
+    def total_flipkart_results(self, obj):
+        return _flipkart_results_for_keyword(obj).count()
 
     @admin.display(description="Product matching")
     def product_matching_summary(self, obj):
@@ -376,6 +519,60 @@ class SearchKeywordAdmin(admin.ModelAdmin):
                 level=messages.ERROR,
             )
 
+    @admin.action(description="Run Flipkart Search")
+    def run_flipkart_search(self, request, queryset):
+        processed_keywords = successful_keywords = failed_keywords = skipped_keywords = 0
+        candidates_found = saved = skipped_duplicates = 0
+        failures = []
+
+        for search_keyword in queryset.iterator():
+            processed_keywords += 1
+            try:
+                summary = run_flipkart_search_for_keyword(search_keyword)
+            except Exception as exc:
+                failed_keywords += 1
+                failures.append(f"{search_keyword.keyword} ({exc})")
+                continue
+
+            if summary.failed:
+                failed_keywords += 1
+                failures.extend(
+                    f"{search_keyword.keyword} / {failure}"
+                    for failure in summary.failed_products
+                )
+            else:
+                successful_keywords += 1
+
+            candidates_found += summary.candidates_found
+            saved += summary.saved
+            skipped_duplicates += summary.skipped_duplicates
+            self.message_user(
+                request,
+                f"{search_keyword.keyword}: processed {summary.amazon_products_total} Flipkart keyword search, "
+                f"found {summary.candidates_found} Flipkart candidates, "
+                f"saved {summary.saved}, skipped {summary.skipped_duplicates} duplicates.",
+                level=messages.ERROR if summary.failed else messages.SUCCESS,
+            )
+
+        if failures:
+            self.message_user(
+                request,
+                "Flipkart search failures: " + "; ".join(failures),
+                level=messages.ERROR,
+            )
+        self.message_user(
+            request,
+            "Flipkart search completed. "
+            f"Keywords processed: {processed_keywords} "
+            f"Successful: {successful_keywords} "
+            f"Failed: {failed_keywords} "
+            f"Skipped: {skipped_keywords} "
+            f"Candidates found: {candidates_found} "
+            f"Saved: {saved} "
+            f"Duplicates skipped: {skipped_duplicates}.",
+            level=messages.ERROR if failed_keywords else messages.SUCCESS,
+        )
+
 
 @admin.register(AmazonSearchResult)
 class AmazonSearchResultAdmin(admin.ModelAdmin):
@@ -421,8 +618,8 @@ class AmazonSearchResultAdmin(admin.ModelAdmin):
 
 @admin.register(FlipkartSearchResult)
 class FlipkartSearchResultAdmin(admin.ModelAdmin):
-    list_display = ("amazon_product", "pid", "title", "product_url", "processed", "created_at")
-    search_fields = ("pid", "title", "amazon_product__asin", "amazon_product__product_title")
+    list_display = ("search_keyword", "amazon_product", "pid", "title", "product_url", "processed", "created_at")
+    search_fields = ("pid", "title", "amazon_product__asin", "amazon_product__product_title", "search_keyword__keyword")
     list_filter = ("processed", "sponsored")
     ordering = ("position", "-created_at")
     actions = ("extract_flipkart_products",)
@@ -430,7 +627,7 @@ class FlipkartSearchResultAdmin(admin.ModelAdmin):
     @admin.action(description="Extract Flipkart Products")
     def extract_flipkart_products(self, request, queryset):
         successful = failed = skipped = 0
-        for search_result in queryset.select_related("amazon_product"):
+        for search_result in queryset.select_related("amazon_product", "search_keyword"):
             try:
                 processed = process_flipkart_search_result(search_result)
             except Exception as exc:
@@ -453,25 +650,53 @@ class FlipkartSearchResultAdmin(admin.ModelAdmin):
         )
 
 
+class FlipkartProductAdminForm(forms.ModelForm):
+    class Meta:
+        model = FlipkartProduct
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["categories"].queryset = Category.objects.filter(
+            is_active=True,
+        ).order_by("display_order", "name")
+
+
 @admin.register(FlipkartProduct)
 class FlipkartProductAdmin(admin.ModelAdmin):
+    form = FlipkartProductAdminForm
     list_display = (
-        "pid", "product_title", "brand", "current_selling_price_inr",
-        "availability", "status", "extracted_at",
+        "image_preview", "pid", "product_title", "brand", "categories_display", "current_selling_price_inr",
+        "availability", "status", "approval_status", "publication_status",
+        "published_product", "amazon_offer_status", "extracted_at",
     )
     search_fields = (
         "pid", "product_title", "brand", "search_result__pid",
         "search_result__amazon_product__asin",
+        "search_result__search_keyword__keyword",
     )
-    list_filter = ("status", "availability", "brand")
+    list_filter = ("status", "approval_status", "published", "availability", "brand", "categories")
     ordering = ("-updated_at",)
-    readonly_fields = ("source_search_result", "updated_at", "extracted_at")
+    actions = (
+        "approve_selected",
+        "assign_categories",
+        "publish_selected",
+        "unpublish_selected",
+        "search_amazon",
+    )
+    autocomplete_fields = ("published_product",)
+    filter_horizontal = ("categories",)
+    readonly_fields = ("source_search_result", "image_preview", "updated_at", "extracted_at", "published", "published_at", "approved_at", "approved_by")
     fieldsets = (
         (None, {"fields": ("pid", "search_result", "source_search_result", "product_title", "brand", "url", "availability", "status", "error_message")}),
         ("Pricing", {"fields": ("mrp_inr", "current_selling_price_inr", "selling_price_min_inr", "selling_price_max_inr", "discount_percentage")}),
         ("Specifications", {"fields": ("processor", "ram", "storage", "operating_system", "display_size", "resolution", "color", "weight_kg", "software", "warranty")}),
-        ("Metadata", {"fields": ("images", "primary_seller", "seller_rating", "extracted_at", "updated_at")}),
+        ("Publishing", {"fields": ("approval_status", "published", "categories", "published_product", "approved_by", "approved_at", "published_at")}),
+        ("Metadata", {"fields": ("images", "image_preview", "primary_seller", "seller_rating", "extracted_at", "updated_at")}),
     )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("categories")
 
     @admin.display(description="Source search result")
     def source_search_result(self, obj):
@@ -480,23 +705,366 @@ class FlipkartProductAdmin(admin.ModelAdmin):
         url = reverse("admin:importer_flipkartsearchresult_change", args=[obj.search_result_id])
         return format_html('<a href="{}">{}</a>', url, obj.search_result.pid)
 
+    @admin.display(description="Image")
+    def image_preview(self, obj):
+        image_url = first_valid_image_url(obj) if obj else ""
+        if not image_url:
+            return "-"
+        return format_html(
+            '<img src="{}" alt="{}" width="64" height="64" style="object-fit:contain" />',
+            image_url,
+            obj.product_title or obj.pid,
+        )
+
+    def save_model(self, request, obj, form, change):
+        previous = (
+            FlipkartProduct.objects.get(pk=obj.pk)
+            if change and obj.pk
+            else None
+        )
+        if previous and previous.published_product_id and not obj.published_product_id:
+            unpublish_flipkart_product(previous)
+            obj.published = False
+        super().save_model(request, obj, form, change)
+        if obj.published_product_id:
+            try:
+                associate_flipkart_product(obj, obj.published_product, request.user)
+            except PublishValidationError as exc:
+                self.message_user(request, str(exc), level=messages.ERROR)
+
+    @admin.display(description="Publication")
+    def publication_status(self, obj):
+        return "Published" if obj.published else "Unpublished"
+
+    @admin.display(description="Categories")
+    def categories_display(self, obj):
+        return ", ".join(category.name for category in obj.categories.all()) or "-"
+
+    @admin.display(description="Amazon")
+    def amazon_offer_status(self, obj):
+        if obj.search_result_id and obj.search_result.amazon_product_id:
+            return "✓ Linked"
+        return "— Not linked"
+
+    def get_urls(self):
+        custom_urls = [
+            path(
+                "assign-categories/",
+                self.admin_site.admin_view(self.assign_categories_view),
+                name="importer_flipkartproduct_assign_categories",
+            ),
+        ]
+        return custom_urls + super().get_urls()
+
+    @admin.action(description="Add selected Flipkart products to category")
+    def assign_categories(self, request, queryset):
+        selected_ids = ",".join(str(pk) for pk in queryset.values_list("pk", flat=True))
+        if not selected_ids:
+            self.message_user(request, "No Flipkart products were selected.", level=messages.WARNING)
+            return None
+        url = reverse("admin:importer_flipkartproduct_assign_categories")
+        return HttpResponseRedirect(f"{url}?ids={selected_ids}")
+
+    def assign_categories_view(self, request):
+        raw_ids = request.POST.get("ids", "") if request.method == "POST" else request.GET.get("ids", "")
+        selected_ids = [value for value in raw_ids.split(",") if value]
+        products = self.model.objects.filter(pk__in=selected_ids).order_by("pid")
+        if not products.exists():
+            self.message_user(request, "No Flipkart products were selected.", level=messages.WARNING)
+            return HttpResponseRedirect(reverse("admin:importer_flipkartproduct_changelist"))
+
+        form = AssignPublishCategoriesForm(request.POST or None)
+        form.fields["categories"].label = "Categories"
+        if request.method == "POST" and form.is_valid():
+            products = assign_staged_product_categories(
+                FlipkartProduct,
+                selected_ids,
+                form.cleaned_data["categories"],
+            )
+            self.message_user(
+                request,
+                f"{len(products)} Flipkart products were assigned to "
+                f"{len(form.cleaned_data['categories'])} categories.",
+                level=messages.SUCCESS,
+            )
+            return HttpResponseRedirect(reverse("admin:importer_flipkartproduct_changelist"))
+
+        context = {
+            **self.admin_site.each_context(request),
+            "opts": self.model._meta,
+            "title": "Add selected Flipkart products to category",
+            "selection_label": "Selected Flipkart products",
+            "form": form,
+            "selected_products": products,
+            "selected_ids": ",".join(str(pk) for pk in products.values_list("pk", flat=True)),
+            "media": self.media + form.media,
+        }
+        return TemplateResponse(
+            request,
+            "admin/importer/amazonproduct/assign_categories.html",
+            context,
+        )
+
+    @admin.action(description="Approve selected Flipkart products")
+    def approve_selected(self, request, queryset):
+        for product in queryset:
+            try:
+                approve_flipkart_product(product, request.user)
+            except PublishValidationError as exc:
+                self.message_user(request, f"{product.pid}: {exc}", level=messages.WARNING)
+        self.message_user(request, "Selected Flipkart products approved.", level=messages.SUCCESS)
+
+    @admin.action(description="Publish selected approved Flipkart products")
+    def publish_selected(self, request, queryset):
+        for product in queryset:
+            try:
+                publish_flipkart_product(product, request.user)
+            except PublishValidationError as exc:
+                self.message_user(request, f"{product.pid}: {exc}", level=messages.ERROR)
+        self.message_user(request, "Selected approved Flipkart products processed.", level=messages.SUCCESS)
+
+    @admin.action(description="Unpublish selected Flipkart products")
+    def unpublish_selected(self, request, queryset):
+        for product in queryset.filter(published=True):
+            unpublish_flipkart_product(product)
+        self.message_user(request, "Selected Flipkart products unpublished.", level=messages.SUCCESS)
+
+    @admin.action(description="Search Amazon for selected Flipkart products")
+    def search_amazon(self, request, queryset):
+        searched = failed = 0
+        for product in queryset:
+            keyword_text = (product.product_title or product.brand or product.pid).strip()
+            try:
+                keyword, _ = SearchKeyword.objects.get_or_create(keyword=keyword_text)
+                run_amazon_search_for_keyword(keyword)
+                searched += 1
+            except Exception as exc:
+                failed += 1
+                self.message_user(request, f"{product.pid}: Amazon search failed: {exc}", level=messages.ERROR)
+        self.message_user(
+            request,
+            f"Amazon search completed for {searched} Flipkart product(s); failures: {failed}.",
+            level=messages.ERROR if failed else messages.SUCCESS,
+        )
+
 
 @admin.register(AmazonProduct)
 class AmazonProductAdmin(admin.ModelAdmin):
+    form = AmazonProductAdminForm
+    change_form_template = "admin/importer/amazonproduct/change_form.html"
     list_display = (
+        "image_preview",
         "asin",
         "product_title",
+        "brand",
         "search_keyword",
         "extraction_status",
+        "approval_status_display",
+        "publication_status",
+        "categories_display",
+        "current_selling_price_inr",
+        "mrp_inr",
+        "availability",
+        "flipkart_offer_status",
+        "image_available",
+        "created_at",
         "flipkart_search_status",
         "flipkart_candidates",
         "updated_at",
     )
-    search_fields = ("asin", "product_title", "brand")
-    list_filter = ("status", "availability", "brand")
+    search_fields = ("asin", "product_title", "brand", "url")
+    list_filter = ("approval_status", "published", "status", "availability", "brand", "categories")
     ordering = ("-updated_at",)
-    actions = ("search_flipkart",)
+    actions = (
+        "approve_selected",
+        "publish_selected",
+        "unpublish_selected",
+        "assign_categories",
+        "search_flipkart",
+    )
     inlines = (FlipkartSearchResultInline, ProductMatchInline)
+    list_select_related = ("published_product",)
+    filter_horizontal = ("categories",)
+    readonly_fields = (
+        "id", "image_preview", "extraction_status", "approval_status_display",
+        "publication_status", "created_at", "updated_at", "extracted_at",
+        "approved_at", "approved_by", "published", "published_at", "published_product_link",
+    )
+    fieldsets = (
+        (None, {"fields": ("id", "asin", "product_title", "brand", "url", "availability", "images", "image_preview")}),
+        ("Pricing", {"fields": ("mrp_inr", "current_selling_price_inr", "selling_price_min_inr", "selling_price_max_inr", "discount_percentage")}),
+        ("Extraction", {"fields": ("status", "extraction_status", "error_message", "extracted_at", "created_at", "updated_at")}),
+        ("Publishing workflow", {"fields": ("approval_status", "approval_status_display", "published", "publication_status", "categories", "published_product_link", "approved_by", "approved_at", "published_at")}),
+        ("Product details", {"fields": ("primary_seller", "seller_rating", "processor", "ram", "storage", "operating_system", "display_size", "resolution", "color", "weight_kg", "software", "warranty")}),
+    )
+
+    @admin.display(description="Image")
+    def image_preview(self, obj):
+        image_url = first_valid_image_url(obj) if obj else ""
+        if not image_url:
+            return "-"
+        return format_html('<img src="{}" alt="{}" width="64" height="64" style="object-fit:contain" />', image_url, obj.product_title or obj.asin)
+
+    @admin.display(description="Approval")
+    def approval_status_display(self, obj):
+        return obj.get_approval_status_display()
+
+    @admin.display(description="Publication")
+    def publication_status(self, obj):
+        return "Published" if obj.published else "Unpublished"
+
+    @admin.display(description="Categories")
+    def categories_display(self, obj):
+        return ", ".join(obj.categories.values_list("name", flat=True)) or "-"
+
+    @admin.display(description="Image available")
+    def image_available(self, obj):
+        return bool(first_valid_image_url(obj))
+
+    @admin.display(description="Flipkart")
+    def flipkart_offer_status(self, obj):
+        query = Q(search_result__amazon_product=obj, published=True)
+        if obj.published_product_id:
+            query |= Q(published_product_id=obj.published_product_id, published=True)
+        linked = FlipkartProduct.objects.filter(query).first()
+        return "✓ Available" if linked else "— Not linked"
+
+    def get_search_results(self, request, queryset, search_term):
+        queryset, may_have_duplicates = super().get_search_results(request, queryset, search_term)
+        if search_term:
+            keyword_asins = AmazonSearchResult.objects.filter(
+                keyword__keyword__icontains=search_term,
+            ).values("asin")
+            queryset = self.model.objects.filter(
+                Q(pk__in=queryset.values("pk")) | Q(asin__in=keyword_asins),
+            )
+        return queryset, may_have_duplicates
+
+    @admin.display(description="Published product")
+    def published_product_link(self, obj):
+        if not obj or not obj.published_product_id:
+            return "-"
+        url = reverse("admin:products_product_change", args=[obj.published_product_id])
+        return format_html('<a href="{}">{}</a>', url, obj.published_product)
+
+    def get_urls(self):
+        custom_urls = [
+            path(
+                "assign-categories/",
+                self.admin_site.admin_view(self.assign_categories_view),
+                name="importer_amazonproduct_assign_categories",
+            ),
+        ]
+        return custom_urls + super().get_urls()
+
+    @admin.action(description="Add selected products to category")
+    def assign_categories(self, request, queryset):
+        selected_ids = ",".join(str(pk) for pk in queryset.values_list("pk", flat=True))
+        if not selected_ids:
+            self.message_user(request, "No Amazon products were selected.", level=messages.WARNING)
+            return None
+        url = reverse("admin:importer_amazonproduct_assign_categories")
+        return HttpResponseRedirect(f"{url}?ids={selected_ids}")
+
+    def assign_categories_view(self, request):
+        raw_ids = request.POST.get("ids", "") if request.method == "POST" else request.GET.get("ids", "")
+        selected_ids = [value for value in raw_ids.split(",") if value]
+        products = self.model.objects.filter(pk__in=selected_ids).order_by("asin")
+        if not products.exists():
+            self.message_user(request, "No Amazon products were selected.", level=messages.WARNING)
+            return HttpResponseRedirect(reverse("admin:importer_amazonproduct_changelist"))
+
+        form = AssignPublishCategoriesForm(request.POST or None)
+        form.fields["categories"].label = "Categories"
+        if request.method == "POST" and form.is_valid():
+            products = assign_amazon_product_categories(
+                selected_ids,
+                form.cleaned_data["categories"],
+            )
+            self.message_user(
+                request,
+                f"{len(products)} Amazon products were assigned to "
+                f"{len(form.cleaned_data['categories'])} categories.",
+                level=messages.SUCCESS,
+            )
+            return HttpResponseRedirect(reverse("admin:importer_amazonproduct_changelist"))
+
+        context = {
+            **self.admin_site.each_context(request),
+            "opts": self.model._meta,
+            "title": "Add selected products to category",
+            "form": form,
+            "selected_products": products,
+            "selected_ids": ",".join(str(pk) for pk in products.values_list("pk", flat=True)),
+            "media": self.media + form.media,
+        }
+        return TemplateResponse(
+            request,
+            "admin/importer/amazonproduct/assign_categories.html",
+            context,
+        )
+
+    @admin.action(description="Approve selected Amazon products")
+    def approve_selected(self, request, queryset):
+        approved = skipped = 0
+        for product in queryset:
+            try:
+                approve_amazon_product(product, request.user)
+                approved += 1
+            except PublishValidationError as exc:
+                skipped += 1
+                self.message_user(request, f"{product.asin}: {exc}", level=messages.WARNING)
+        self.message_user(request, f"Approved {approved} Amazon product(s); skipped {skipped}.", level=messages.SUCCESS)
+
+    @admin.action(description="Publish selected approved Amazon products")
+    def publish_selected(self, request, queryset):
+        published = failed = 0
+        for product in queryset:
+            try:
+                publish_amazon_product(product, request.user)
+                published += 1
+            except PublishValidationError as exc:
+                failed += 1
+                self.message_user(request, f"{product.asin}: {exc}", level=messages.ERROR)
+        self.message_user(request, f"Published {published} Amazon product(s); failed {failed}.", level=messages.ERROR if failed else messages.SUCCESS)
+
+    @admin.action(description="Unpublish selected Amazon products")
+    def unpublish_selected(self, request, queryset):
+        for product in queryset.filter(published=True):
+            unpublish_amazon_product(product)
+        self.message_user(request, "Selected Amazon products unpublished.", level=messages.SUCCESS)
+
+    def response_change(self, request, obj):
+        if "_approve_product" in request.POST:
+            try:
+                approve_amazon_product(obj, request.user)
+                self.message_user(request, "Amazon product approved. It is still unpublished.")
+            except PublishValidationError as exc:
+                self.message_user(request, str(exc), level=messages.ERROR)
+        elif "_publish_product" in request.POST:
+            try:
+                product = publish_amazon_product(obj, request.user)
+                self.message_user(request, f"Published as {product.title}.")
+            except PublishValidationError as exc:
+                self.message_user(request, str(exc), level=messages.ERROR)
+        elif "_unpublish_product" in request.POST:
+            unpublish_amazon_product(obj)
+            self.message_user(request, "Amazon product unpublished.")
+        elif "_search_flipkart_keyword" in request.POST:
+            try:
+                summary = search_and_save_flipkart_candidates_for_amazon_product(
+                    obj,
+                    request.POST.get("flipkart_keyword", ""),
+                )
+                self.message_user(
+                    request,
+                    f"Flipkart search complete. Found {summary.candidates_found} result(s); "
+                    f"saved {summary.saved}, skipped {summary.skipped_duplicates} duplicate(s).",
+                    level=messages.SUCCESS,
+                )
+            except Exception as exc:
+                self.message_user(request, f"Flipkart search failed: {exc}", level=messages.ERROR)
+        return super().response_change(request, obj)
 
     @admin.action(description="Search Flipkart for selected products")
     def search_flipkart(self, request, queryset):
@@ -784,10 +1352,10 @@ class ProductMatchAdmin(admin.ModelAdmin):
     def amazon_price(self, obj): return self._amazon_value(obj, "current_selling_price_inr")
     @admin.display(description="Amazon image")
     def amazon_image(self, obj):
-        images = obj.amazon_product.images or []
-        if not images:
+        image_url = first_valid_image_url(obj.amazon_product)
+        if not image_url:
             return "-"
-        return format_html('<img src="{}" alt="Amazon product" width="96" />', images[0])
+        return format_html('<img src="{}" alt="Amazon product" width="96" />', image_url)
     @admin.display(description="Amazon URL")
     def amazon_url(self, obj):
         return format_html('<a href="{}" target="_blank">Open Amazon page</a>', obj.amazon_product.url)

@@ -8,20 +8,112 @@ from django.urls import reverse
 from django.utils.html import conditional_escape
 from django.utils.safestring import mark_safe
 
+from apps.importer.models import AmazonProduct, FlipkartProduct, ProductMatch
+
 from .models import Product, ProductPrice
+
+
+def first_valid_image_url(images) -> str:
+    """Return the first HTTP(S) image URL from extracted image data."""
+    if isinstance(images, str):
+        try:
+            decoded_images = json.loads(images)
+        except (TypeError, ValueError):
+            decoded_images = images
+        images = [decoded_images] if isinstance(decoded_images, str) else decoded_images
+    if not isinstance(images, (list, tuple)):
+        return ""
+    for image in images:
+        if not isinstance(image, str):
+            continue
+        image = image.strip()
+        if image.startswith(("http://", "https://")):
+            return image
+    return ""
+
+
+def get_product_image_urls(product: Product) -> tuple[str, str]:
+    """Return a remote marketplace image first, then the uploaded image."""
+    marketplace_image_url = (product.marketplace_image_url or "").strip()
+    uploaded_image_url = product.featured_image.url if product.featured_image else ""
+    if marketplace_image_url:
+        return marketplace_image_url, uploaded_image_url
+
+    matches = getattr(product, "image_source_matches", None)
+    if matches is None:
+        matches = product.importer_product_matches.filter(
+            match_status="published",
+        ).select_related("amazon_product").all()
+    amazon_image_url = next(
+        (
+            image_url
+            for match in matches
+            if (image_url := first_valid_image_url(match.amazon_product.images))
+        ),
+        "",
+    )
+    if not amazon_image_url:
+        amazon_products = getattr(product, "published_amazon_products", None)
+        if amazon_products is None:
+            amazon_products = product.amazon_products.filter(published=True)
+        amazon_image_url = next(
+            (
+                image_url
+                for amazon_product in amazon_products
+                if (image_url := first_valid_image_url(amazon_product.images))
+            ),
+            "",
+        )
+    flipkart_products = getattr(product, "published_flipkart_products", None)
+    if not amazon_image_url and flipkart_products is None:
+        flipkart_products = product.flipkart_products.filter(published=True)
+    if flipkart_products is None:
+        flipkart_products = []
+    flipkart_image_url = next(
+        (
+            image_url
+            for flipkart_product in flipkart_products or []
+            if (image_url := first_valid_image_url(flipkart_product.images))
+        ),
+        "",
+    )
+    return amazon_image_url or flipkart_image_url or uploaded_image_url, uploaded_image_url
 
 
 def get_product_detail_queryset() -> QuerySet[Product]:
     prices = ProductPrice.objects.order_by("platform")
+    image_source_matches = ProductMatch.objects.filter(
+        match_status="published",
+    ).select_related("amazon_product")
     return (
         Product.objects.public()
         .select_related("category")
-        .prefetch_related(Prefetch("prices", queryset=prices, to_attr="detail_prices"))
+        .prefetch_related(
+            Prefetch("prices", queryset=prices, to_attr="detail_prices"),
+            Prefetch(
+                "amazon_products",
+                queryset=AmazonProduct.objects.filter(published=True),
+                to_attr="published_amazon_products",
+            ),
+            Prefetch(
+                "flipkart_products",
+                queryset=FlipkartProduct.objects.filter(published=True),
+                to_attr="published_flipkart_products",
+            ),
+            Prefetch(
+                "importer_product_matches",
+                queryset=image_source_matches,
+                to_attr="image_source_matches",
+            ),
+        )
     )
 
 
 def get_search_queryset(query: str) -> QuerySet[Product]:
     prices = ProductPrice.objects.order_by("platform")
+    image_source_matches = ProductMatch.objects.filter(
+        match_status="published",
+    ).select_related("amazon_product")
     return (
         Product.objects.public()
         .filter(
@@ -30,7 +122,24 @@ def get_search_queryset(query: str) -> QuerySet[Product]:
             | Q(category__name__icontains=query)
         )
         .select_related("category")
-        .prefetch_related(Prefetch("prices", queryset=prices, to_attr="search_prices"))
+        .prefetch_related(
+            Prefetch("prices", queryset=prices, to_attr="search_prices"),
+            Prefetch(
+                "amazon_products",
+                queryset=AmazonProduct.objects.filter(published=True),
+                to_attr="published_amazon_products",
+            ),
+            Prefetch(
+                "flipkart_products",
+                queryset=FlipkartProduct.objects.filter(published=True),
+                to_attr="published_flipkart_products",
+            ),
+            Prefetch(
+                "importer_product_matches",
+                queryset=image_source_matches,
+                to_attr="image_source_matches",
+            ),
+        )
         .order_by("-created_at", "title")
         .distinct()
     )
@@ -38,13 +147,33 @@ def get_search_queryset(query: str) -> QuerySet[Product]:
 
 def get_related_product_cards(product: Product, limit: int = 4) -> list[dict[str, Any]]:
     prices = ProductPrice.objects.order_by("platform")
+    image_source_matches = ProductMatch.objects.filter(
+        match_status="published",
+    ).select_related("amazon_product")
     products = (
         Product.objects.public().filter(
             category_id=product.category_id,
         )
         .exclude(pk=product.pk)
         .select_related("category")
-        .prefetch_related(Prefetch("prices", queryset=prices, to_attr="card_prices"))
+        .prefetch_related(
+            Prefetch("prices", queryset=prices, to_attr="card_prices"),
+            Prefetch(
+                "amazon_products",
+                queryset=AmazonProduct.objects.filter(published=True),
+                to_attr="published_amazon_products",
+            ),
+            Prefetch(
+                "flipkart_products",
+                queryset=FlipkartProduct.objects.filter(published=True),
+                to_attr="published_flipkart_products",
+            ),
+            Prefetch(
+                "importer_product_matches",
+                queryset=image_source_matches,
+                to_attr="image_source_matches",
+            ),
+        )
         .order_by("-created_at", "title")[:limit]
     )
     return [
@@ -66,14 +195,24 @@ def build_product_card(
     amazon = prices_by_platform.get(ProductPrice.Platform.AMAZON)
     flipkart = prices_by_platform.get(ProductPrice.Platform.FLIPKART)
     lowest_platform = get_lowest_platform(amazon=amazon, flipkart=flipkart)
+    available_prices = [price for price in (amazon, flipkart) if price is not None]
+    image_url, fallback_image_url = get_product_image_urls(product)
 
     card = {
         "product": product,
         "title": product.title,
         "brand": product.brand or "Featured",
-        "image_url": product.featured_image.url if product.featured_image else "",
+        "image_url": image_url,
+        "fallback_image_url": fallback_image_url,
         "amazon_price": format_price(amazon.price if amazon else None),
         "flipkart_price": format_price(flipkart.price if flipkart else None),
+        "has_amazon": amazon is not None,
+        "has_flipkart": flipkart is not None,
+        "lowest_price": (
+            format_price(min(available_prices, key=lambda price: price.price).price)
+            if available_prices
+            else ""
+        ),
         "is_amazon_lowest": lowest_platform == ProductPrice.Platform.AMAZON,
         "is_flipkart_lowest": lowest_platform == ProductPrice.Platform.FLIPKART,
         "details_url": reverse("product-detail", kwargs={"slug": product.slug}),
@@ -110,8 +249,13 @@ def build_product_detail_context(
     amazon = prices_by_platform.get(ProductPrice.Platform.AMAZON)
     flipkart = prices_by_platform.get(ProductPrice.Platform.FLIPKART)
     offers = [
-        build_offer(amazon, ProductPrice.Platform.AMAZON),
-        build_offer(flipkart, ProductPrice.Platform.FLIPKART),
+        build_offer(amazon, ProductPrice.Platform.AMAZON)
+        for amazon in [amazon]
+        if amazon is not None
+    ] + [
+        build_offer(flipkart, ProductPrice.Platform.FLIPKART)
+        for flipkart in [flipkart]
+        if flipkart is not None
     ]
     available_offers = [offer for offer in offers if offer["price_value"] is not None]
     best_offer = min(
@@ -233,7 +377,7 @@ def get_lowest_platform(
 def format_price(price: Decimal | None) -> str:
     if price is None:
         return "Not listed"
-    return f"Rs. {price:,.0f}"
+    return f"₹{price:,.0f}"
 
 
 def format_currency(value: Decimal | None) -> str:

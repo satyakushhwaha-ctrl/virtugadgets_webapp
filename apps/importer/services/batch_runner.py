@@ -7,12 +7,14 @@ services. It intentionally contains no Playwright or marketplace logic.
 from dataclasses import dataclass
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from ..models import (
     AmazonProduct,
     BatchStatus,
     FlipkartProduct,
+    FlipkartSearchResult,
     ImportBatch,
     ImportStatus,
 )
@@ -115,21 +117,32 @@ def run_batch(batch: ImportBatch) -> ImportBatch:
 
         _ensure_not_cancelled(batch)
         _set_status(batch, BatchStatus.FLIPKART_SEARCH)
-        for product in batch.amazon_products.filter(status=ImportStatus.COMPLETED):
-            if not batch.flipkart_search_results.filter(amazon_product=product).exists():
-                try:
-                    search_and_save_flipkart_candidates(product)
-                except Exception as exc:
-                    failed_items += 1
-                    errors.append(f"Flipkart search for {product.asin}: {exc}")
-                    continue
-            for result in product.flipkart_results.all():
+        # Handle keyword-level Flipkart search results (from SearchKeyword admin action)
+        keyword_results = batch.flipkart_search_results.filter(
+            search_keyword=batch.keyword,
+            amazon_product__isnull=True,
+        )
+        if keyword_results.exists() and not keyword_results.filter(processed=True).exists():
+            # Keyword-level search was already run via admin action; just associate
+            for result in keyword_results:
                 result.batches.add(batch)
+        else:
+            # Product-level Flipkart search for each completed Amazon product
+            for product in batch.amazon_products.filter(status=ImportStatus.COMPLETED):
+                if not batch.flipkart_search_results.filter(amazon_product=product).exists():
+                    try:
+                        search_and_save_flipkart_candidates(product)
+                    except Exception as exc:
+                        failed_items += 1
+                        errors.append(f"Flipkart search for {product.asin}: {exc}")
+                        continue
+                for result in product.flipkart_results.all():
+                    result.batches.add(batch)
         _refresh_counters(batch, failed_items)
 
         _ensure_not_cancelled(batch)
         _set_status(batch, BatchStatus.FLIPKART_EXTRACTION)
-        for result in batch.flipkart_search_results.select_related("amazon_product"):
+        for result in batch.flipkart_search_results.select_related("amazon_product", "search_keyword"):
             try:
                 process_flipkart_search_result(result)
                 product = result.flipkart_product

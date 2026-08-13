@@ -1,5 +1,6 @@
 """Flipkart candidate discovery service."""
 
+import logging
 import re
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
@@ -14,6 +15,7 @@ CAPACITY_PATTERN = re.compile(
     r"(?:\s*(?:RAM|ROM|STORAGE))?$",
     re.IGNORECASE,
 )
+logger = logging.getLogger(__name__)
 
 
 def _normalise_capacity(value: str | None, kind: str) -> str | None:
@@ -266,6 +268,8 @@ def search_flipkart(query: str) -> list[dict]:
     if not isinstance(query, str) or not query.strip():
         raise ValidationError("Flipkart search query cannot be empty.")
 
+    logger.info("Fetching Flipkart webpage details securely via Playwright...")
+    logger.info("Flipkart search URL: %s", SEARCH_URL.format(query=quote_plus(query.strip())))
     normalized = []
     seen_pids = set()
     for result in _scrape_search_results(query.strip()):

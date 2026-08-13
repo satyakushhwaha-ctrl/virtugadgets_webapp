@@ -246,25 +246,18 @@ def extract_flipkart_product(url: str) -> dict:
 
 
 def process_flipkart_search_result(search_result: FlipkartSearchResult) -> bool:
-  """Extract one candidate into staging and mark it processed on success."""
-  try:
-    product = search_result.flipkart_product
-  except FlipkartProduct.DoesNotExist:
-    product = None
-
-  if product and product.status == ImportStatus.COMPLETED:
-    if not search_result.processed:
-      search_result.processed = True
-      search_result.save(update_fields=["processed"])
-    return False
-
-  if product is None:
-    product = FlipkartProduct.objects.create(
-        search_result=search_result,
-        pid=search_result.pid,
-        url=search_result.product_url,
-        status=ImportStatus.PENDING,
-    )
+  """Extract one candidate and upsert its PID marketplace record."""
+  pid = (search_result.pid or "").strip()
+  if not pid:
+    raise ValueError("Flipkart search result is missing a PID.")
+  product, _ = FlipkartProduct.objects.get_or_create(
+      pid=pid,
+      defaults={
+          "search_result": search_result,
+          "url": search_result.product_url,
+          "status": ImportStatus.PENDING,
+      },
+  )
 
   product.status = ImportStatus.RUNNING
   product.error_message = ""
@@ -283,7 +276,7 @@ def process_flipkart_search_result(search_result: FlipkartSearchResult) -> bool:
           "warranty",
       ):
         setattr(product, field, data.get(field))
-      product.pid = search_result.pid
+      product.pid = pid
       product.status = ImportStatus.COMPLETED
       product.error_message = ""
       product.extracted_at = timezone.now()

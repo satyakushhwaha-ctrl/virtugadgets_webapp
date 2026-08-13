@@ -8,6 +8,7 @@
         loading="lazy"
         width="400"
         height="400"
+        {% if product.fallback_image_url and product.image_url != product.fallback_image_url %}onerror="this.onerror=null;this.src='{{ product.fallback_image_url }}';"{% endif %}
       >
     {% else %}
       <div class="product-placeholder" aria-hidden="true">
@@ -32,10 +33,14 @@
       </span>
     </div>
     <h3 class="min-h-[3rem] text-base font-bold leading-6 text-slate-950 line-clamp-2">{% if product.highlighted_title %}{{ product.highlighted_title|safe }}{% else %}{{ product.title }}{% endif %}</h3>
+    {% if product.lowest_price %}<div class="flex min-w-0 flex-wrap items-baseline gap-2 text-sm font-extrabold text-slate-950">
+      <span class="shrink-0 whitespace-nowrap">{{ product.lowest_price }}</span>
+      <span class="shrink-0 whitespace-nowrap font-semibold text-success-700">Lowest price</span>
+    </div>{% endif %}
     <dl class="space-y-1.5 text-xs sm:space-y-2.5 sm:text-sm" aria-label="Price comparison">
-      <div class="price-row min-h-8 gap-1 sm:min-h-10">
+      {% if product.has_amazon %}<div class="price-row min-h-8 gap-1 sm:min-h-10">
         <dt class="price-label shrink-0 text-[11px] sm:text-sm">Amazon</dt>
-        <dd class="price-value ml-auto min-w-0 gap-1 whitespace-nowrap text-[11px] sm:gap-2 sm:text-sm {% if product.is_amazon_lowest %}price-value-lowest{% endif %}">
+        <dd class="price-value ml-auto min-w-0 max-w-full flex-wrap justify-end gap-1 whitespace-nowrap text-[11px] sm:gap-2 sm:text-sm {% if product.is_amazon_lowest %}price-value-lowest{% endif %}">
           <span class="shrink-0">{{ product.amazon_price }}</span>
           {% if product.is_amazon_lowest %}
             <span class="badge-lowest shrink-0 gap-0.5 px-1 py-0.5 text-[9px] sm:text-[10px]">
@@ -44,10 +49,10 @@
             </span>
           {% endif %}
         </dd>
-      </div>
-      <div class="price-row min-h-8 gap-1 sm:min-h-10">
+      </div>{% endif %}
+      {% if product.has_flipkart %}<div class="price-row min-h-8 gap-1 sm:min-h-10">
         <dt class="price-label shrink-0 text-[11px] sm:text-sm">Flipkart</dt>
-        <dd class="price-value ml-auto min-w-0 gap-1 whitespace-nowrap text-[11px] sm:gap-2 sm:text-sm {% if product.is_flipkart_lowest %}price-value-lowest{% endif %}">
+        <dd class="price-value ml-auto min-w-0 max-w-full flex-wrap justify-end gap-1 whitespace-nowrap text-[11px] sm:gap-2 sm:text-sm {% if product.is_flipkart_lowest %}price-value-lowest{% endif %}">
           <span class="shrink-0">{{ product.flipkart_price }}</span>
           {% if product.is_flipkart_lowest %}
             <span class="badge-lowest shrink-0 gap-0.5 px-1 py-0.5 text-[9px] sm:text-[10px]">
@@ -56,7 +61,7 @@
             </span>
           {% endif %}
         </dd>
-      </div>
+      </div>{% endif %}
     </dl>
     <a
       href="{{ product.details_url }}"

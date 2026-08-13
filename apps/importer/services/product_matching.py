@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import re
 import unicodedata
+from urllib.parse import urlparse
 
 from django.db import transaction
 
@@ -74,6 +75,22 @@ def normalize_color(value: str | None) -> str:
         "light-gold": "light gold",
     }
     return aliases.get(value, value)
+
+
+def first_valid_image_url(product) -> str:
+    """Return the first usable extracted image URL without fetching it."""
+    images = getattr(product, "images", None)
+    if not isinstance(images, (list, tuple)):
+        return ""
+
+    for image in images:
+        if not isinstance(image, str):
+            continue
+        image = image.strip()
+        parsed = urlparse(image)
+        if image and parsed.scheme in {"http", "https"} and parsed.netloc:
+            return image
+    return ""
 
 
 def extract_model_identity(product) -> str:

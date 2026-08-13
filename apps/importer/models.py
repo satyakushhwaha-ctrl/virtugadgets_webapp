@@ -14,6 +14,12 @@ class ImportStatus(models.TextChoices):
     FAILED = "failed", "Failed"
 
 
+class ApprovalStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    APPROVED = "approved", "Approved"
+    REJECTED = "rejected", "Rejected"
+
+
 class BatchStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     RUNNING = "running", "Running"
@@ -188,12 +194,42 @@ class AmazonProduct(models.Model):
         default=ImportStatus.PENDING,
         db_index=True,
     )
+    approval_status = models.CharField(
+        max_length=20,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.PENDING,
+        db_index=True,
+    )
+    published = models.BooleanField(default=False, db_index=True)
+    categories = models.ManyToManyField(
+        Category,
+        blank=True,
+        related_name="amazon_products",
+        help_text="Categories selected for the public catalog; the first is primary.",
+    )
+    published_product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="amazon_products",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_amazon_products",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
     batches = models.ManyToManyField(
         "ImportBatch",
         blank=True,
         related_name="amazon_products",
     )
     error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
     extracted_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -205,12 +241,21 @@ class AmazonProduct(models.Model):
 
 
 class FlipkartSearchResult(models.Model):
-    """A Flipkart candidate found for an Amazon staging product."""
+    """A Flipkart candidate found via keyword search or for an Amazon staging product."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    search_keyword = models.ForeignKey(
+        SearchKeyword,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="flipkart_results",
+    )
     amazon_product = models.ForeignKey(
         AmazonProduct,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="flipkart_results",
     )
     pid = models.CharField(max_length=100, db_index=True)
@@ -230,8 +275,14 @@ class FlipkartSearchResult(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
+                fields=["search_keyword", "pid"],
+                name="unique_flipkart_candidate_per_keyword",
+                condition=models.Q(search_keyword__isnull=False),
+            ),
+            models.UniqueConstraint(
                 fields=["amazon_product", "pid"],
                 name="unique_flipkart_candidate_per_amazon_product",
+                condition=models.Q(amazon_product__isnull=False),
             ),
         ]
         ordering = ["position"]
@@ -292,6 +343,35 @@ class FlipkartProduct(models.Model):
         default=ImportStatus.PENDING,
         db_index=True,
     )
+    approval_status = models.CharField(
+        max_length=20,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.PENDING,
+        db_index=True,
+    )
+    published = models.BooleanField(default=False, db_index=True)
+    categories = models.ManyToManyField(
+        Category,
+        blank=True,
+        related_name="flipkart_products",
+        help_text="Categories selected for the public catalog; the first is primary.",
+    )
+    published_product = models.ForeignKey(
+        Product,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="flipkart_products",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_flipkart_products",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
     batches = models.ManyToManyField(
         "ImportBatch",
         blank=True,

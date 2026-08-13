@@ -1,15 +1,19 @@
 import uuid
 from decimal import Decimal
 from io import StringIO
+from types import SimpleNamespace
 
 from django.core.management import call_command
 from django.db import IntegrityError
+from django.template.loader import render_to_string
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from apps.categories.models import Category
+from apps.importer.models import AmazonProduct
 from apps.products.management.commands.seed_products import PRODUCTS
 from apps.products.models import Product, ProductPrice
+from apps.products.services import build_product_card
 
 
 class ProductModelTests(TestCase):
@@ -38,6 +42,62 @@ class ProductModelTests(TestCase):
         )
 
         self.assertFalse(Product.objects.public().filter(pk=product.pk).exists())
+
+
+class ProductCardImageTests(TestCase):
+    def setUp(self) -> None:
+        self.category = Category.objects.create(name="Mobiles", slug="mobiles")
+        self.product = Product.objects.create(
+            category=self.category,
+            title="iPhone 15",
+            slug="iphone-15-image-test",
+            brand="Apple",
+            featured_image="products/featured/iphone-15.jpg",
+        )
+
+    def build_card(self, images):
+        self.product.image_source_matches = [
+            SimpleNamespace(amazon_product=AmazonProduct(images=images))
+        ]
+        return build_product_card(
+            self.product,
+            price_attribute="missing_prices",
+        )
+
+    def test_marketplace_image_is_preferred_over_uploaded_fallback(self) -> None:
+        card = self.build_card(["", "not-a-url", "https://images.example/second.jpg"])
+
+        self.assertEqual(card["image_url"], "https://images.example/second.jpg")
+        self.assertEqual(card["fallback_image_url"], "/media/products/featured/iphone-15.jpg")
+
+    def test_uploaded_image_is_used_when_amazon_images_are_empty(self) -> None:
+        card = self.build_card([])
+
+        self.assertEqual(card["image_url"], "/media/products/featured/iphone-15.jpg")
+
+    def test_json_encoded_amazon_images_are_supported_safely(self) -> None:
+        card = self.build_card('["", "https://images.example/iphone.jpg"]')
+
+        self.assertEqual(card["image_url"], "https://images.example/iphone.jpg")
+        self.assertEqual(
+            self.build_card("not valid json")["image_url"],
+            "/media/products/featured/iphone-15.jpg",
+        )
+
+    def test_product_card_renders_amazon_image_with_uploaded_fallback(self) -> None:
+        card = self.build_card(["https://images.example/iphone.jpg"])
+
+        html = render_to_string("components/product_card.html", {"product": card})
+
+        self.assertIn('src="https://images.example/iphone.jpg"', html)
+        self.assertIn("/media/products/featured/iphone-15.jpg", html)
+        self.assertIn("object-contain", html)
+
+    def test_product_card_is_safe_when_neither_image_exists(self) -> None:
+        self.product.featured_image = ""
+        card = self.build_card(None)
+
+        self.assertEqual(card["image_url"], "")
 
 
 class ProductPriceModelTests(TestCase):

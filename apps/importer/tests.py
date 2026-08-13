@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
 from django.db import IntegrityError
 from django.test import RequestFactory, TestCase
+from django.utils import timezone
 
 from .models import (
     AmazonProduct,
@@ -25,6 +26,7 @@ from apps.products.models import Product, ProductPrice
 from .admin import (
     AmazonProductAdmin,
     AmazonSearchResultAdmin,
+    FlipkartSearchStatusFilter,
     FlipkartProductAdmin,
     FlipkartSearchResultAdmin,
     ProductMatchAdminForm,
@@ -37,17 +39,31 @@ from .services.flipkart_search import (
     search_flipkart,
 )
 from .services.flipkart_search_results import search_and_save_flipkart_candidates
+from .services.flipkart_search_results import run_flipkart_search_for_keyword
 from .services.amazon_search import search_amazon
 from .services.flipkart_product import (
     extract_flipkart_product,
     process_flipkart_search_result,
 )
 from .services.product_matching import (
+    first_valid_image_url,
     match_products,
     normalize_capacity,
     normalize_color,
 )
-from .services.product_publisher import publish_product_match
+from .services.product_publisher import (
+    PublishValidationError,
+    approve_amazon_product,
+    approve_flipkart_product,
+    assign_amazon_product_categories,
+    assign_staged_product_categories,
+    associate_flipkart_product,
+    publish_amazon_product,
+    publish_flipkart_product,
+    publish_product_match,
+    unpublish_amazon_product,
+    unpublish_flipkart_product,
+)
 from .services.batch_runner import run_batch
 from .services.product_matching import run_product_matching_for_batch
 
@@ -177,6 +193,18 @@ class ImporterTests(TestCase):
         self.assertEqual(product.status, ImportStatus.PENDING)
         self.assertEqual(product.asin, "B000000001")
 
+    def test_first_valid_image_url_uses_first_valid_amazon_image(self):
+        product = AmazonProduct(images=["", "not-a-url", " https://images.example/second.jpg "])
+
+        self.assertEqual(
+            first_valid_image_url(product),
+            "https://images.example/second.jpg",
+        )
+
+    def test_first_valid_image_url_handles_missing_images(self):
+        self.assertEqual(first_valid_image_url(AmazonProduct(images=[])), "")
+        self.assertEqual(first_valid_image_url(AmazonProduct(images=None)), "")
+
     def test_amazon_product_duplicate_asin_is_rejected(self):
         AmazonProduct.objects.create(
             asin="B000000001",
@@ -293,18 +321,20 @@ class ImporterTests(TestCase):
         self.assertIn("Amazon detail timed out", product.error_message)
 
     @patch("apps.importer.services.amazon_product.extract_amazon_product")
-    def test_completed_product_is_skipped(self, extractor):
+    def test_completed_product_is_updated_on_reextraction(self, extractor):
         result = self.make_search_result()
         AmazonProduct.objects.create(
             asin=result.asin,
             url=result.product_url,
             status=ImportStatus.COMPLETED,
         )
+        extractor.return_value = {**MOCK_PRODUCT, "product_title": "Updated phone"}
 
-        self.assertFalse(process_amazon_search_result(result))
+        self.assertTrue(process_amazon_search_result(result))
 
-        extractor.assert_not_called()
+        extractor.assert_called_once()
         result.refresh_from_db()
+        self.assertEqual(AmazonProduct.objects.get(asin=result.asin).product_title, "Updated phone")
         self.assertTrue(result.processed)
 
     @patch("apps.importer.services.amazon_product.extract_amazon_product")
@@ -560,6 +590,62 @@ class ImporterTests(TestCase):
             ],
         )
 
+    @patch("apps.importer.services.flipkart_search_results.search_flipkart")
+    def test_run_flipkart_search_for_keyword_tracks_progress_with_batch(self, search):
+        keyword = SearchKeyword.objects.create(keyword="iphone 16")
+        search.return_value = [
+            {
+                "pid": "MOBTRACK0001",
+                "title": "Apple iPhone 16 256 GB Black",
+                "product_url": "https://www.flipkart.com/apple/p/itm?pid=MOBTRACK0001",
+                "position": 1,
+                "sponsored": False,
+            },
+            {
+                "pid": "MOBTRACK0002",
+                "title": "Apple iPhone 16 Plus 256 GB Blue",
+                "product_url": "https://www.flipkart.com/apple/p/itm?pid=MOBTRACK0002",
+                "position": 2,
+                "sponsored": False,
+            },
+        ]
+
+        summary = run_flipkart_search_for_keyword(keyword)
+
+        batch = ImportBatch.objects.latest("created_at")
+        self.assertEqual(summary.amazon_products_total, 1)
+        self.assertEqual(summary.successful, 1)
+        self.assertEqual(summary.failed, 0)
+        self.assertEqual(summary.skipped, 0)
+        self.assertEqual(batch.status, BatchStatus.COMPLETED)
+        self.assertEqual(batch.amazon_products_count, 1)
+        self.assertEqual(batch.successful_count, 1)
+        self.assertEqual(batch.failed_count, 0)
+        self.assertEqual(batch.flipkart_results_count, 2)
+        self.assertEqual(keyword.import_batches.count(), 1)
+        self.assertEqual(
+            FlipkartSearchResult.objects.filter(
+                batches=batch,
+            ).count(),
+            2,
+        )
+
+    @patch("apps.importer.services.flipkart_search_results.search_flipkart")
+    def test_run_flipkart_search_for_keyword_marks_batch_failed(self, search):
+        keyword = SearchKeyword.objects.create(keyword="iphone 16 pro")
+        search.side_effect = TimeoutError("Flipkart timed out")
+
+        summary = run_flipkart_search_for_keyword(keyword)
+
+        batch = ImportBatch.objects.latest("created_at")
+        self.assertEqual(summary.successful, 0)
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(summary.skipped, 0)
+        self.assertEqual(batch.status, BatchStatus.FAILED)
+        self.assertEqual(batch.successful_count, 0)
+        self.assertEqual(batch.failed_count, 1)
+        self.assertIn("Flipkart search failed", batch.error_message)
+
     def make_flipkart_search_result(
         self,
         pid="MOB123456789",
@@ -645,7 +731,7 @@ class ImporterTests(TestCase):
         self.assertTrue(result.processed)
 
     @patch("apps.importer.services.flipkart_product.extract_flipkart_product")
-    def test_completed_flipkart_product_is_skipped(self, extractor):
+    def test_completed_flipkart_product_is_updated_on_reextraction(self, extractor):
         result = self.make_flipkart_search_result()
         FlipkartProduct.objects.create(
             search_result=result,
@@ -653,11 +739,13 @@ class ImporterTests(TestCase):
             url=result.product_url,
             status=ImportStatus.COMPLETED,
         )
+        extractor.return_value = {**MOCK_FLIPKART_PRODUCT, "product_title": "Updated Flipkart phone"}
 
-        self.assertFalse(process_flipkart_search_result(result))
+        self.assertTrue(process_flipkart_search_result(result))
 
-        extractor.assert_not_called()
+        extractor.assert_called_once()
         result.refresh_from_db()
+        self.assertEqual(FlipkartProduct.objects.get(pid=result.pid).product_title, "Updated Flipkart phone")
         self.assertTrue(result.processed)
 
     @patch("apps.importer.services.flipkart_product.extract_flipkart_product")
@@ -1629,6 +1717,225 @@ class KeywordProductMatchingAdminTests(TestCase):
         model_admin = admin.site._registry[SearchKeyword]
 
         self.assertIn("run_product_matching", model_admin.actions)
+        self.assertIn("run_flipkart_search", model_admin.actions)
+
+    def test_search_keyword_admin_flipkart_action_uses_existing_service_only(self):
+        keyword, amazon, _ = self.make_pair(
+            "laptop", "B0LAPTOP0003", "MOBLAPTOP003", "Dell Laptop 256 GB"
+        )
+        model_admin = admin.site._registry[SearchKeyword]
+        request = self.factory.post("/admin/")
+        request.user = self.user
+
+        summary = SimpleNamespace(
+            amazon_products_total=1,
+            successful=1,
+            failed=0,
+            skipped=0,
+            candidates_found=6,
+            saved=4,
+            skipped_duplicates=2,
+            failed_products=(),
+        )
+
+        with patch("apps.importer.admin.run_flipkart_search_for_keyword", return_value=summary) as flipkart_search:
+            with patch("apps.importer.admin.run_amazon_search_for_keyword") as amazon_search:
+                with patch.object(model_admin, "message_user") as message:
+                    model_admin.run_flipkart_search(
+                        request,
+                        SearchKeyword.objects.filter(pk=keyword.pk),
+                    )
+
+        flipkart_search.assert_called_once_with(keyword)
+        amazon_search.assert_not_called()
+        self.assertEqual(Product.objects.count(), 0)
+        self.assertEqual(ProductPrice.objects.count(), 0)
+        self.assertTrue(any("Flipkart search completed." in str(call) for call in message.call_args_list))
+
+    def test_search_keyword_admin_flipkart_action_processes_multiple_keywords(self):
+        laptop_keyword, _, _ = self.make_pair(
+            "laptop", "B0LAPTOP0004", "MOBLAPTOP004", "Dell Laptop 256 GB"
+        )
+        phone_keyword, _, _ = self.make_pair(
+            "iphone", "B0PHONE00004", "MOBPHONE004", "Apple iPhone 256 GB"
+        )
+        model_admin = admin.site._registry[SearchKeyword]
+        request = self.factory.post("/admin/")
+        request.user = self.user
+
+        summary = SimpleNamespace(
+            amazon_products_total=1,
+            successful=1,
+            failed=0,
+            skipped=0,
+            candidates_found=3,
+            saved=2,
+            skipped_duplicates=1,
+            failed_products=(),
+        )
+
+        with patch("apps.importer.admin.run_flipkart_search_for_keyword", return_value=summary) as flipkart_search:
+            with patch.object(model_admin, "message_user"):
+                model_admin.run_flipkart_search(
+                    request,
+                    SearchKeyword.objects.filter(pk__in=[laptop_keyword.pk, phone_keyword.pk]),
+                )
+
+        self.assertEqual(flipkart_search.call_count, 2)
+
+    def test_search_keyword_admin_total_flipkart_results_uses_persisted_records(self):
+        keyword, amazon, _ = self.make_pair(
+            "iphone", "B0PHONE00011", "MOBPHONE011", "Apple iPhone 256 GB"
+        )
+        batch = ImportBatch.objects.create(
+            keyword=keyword,
+            status=BatchStatus.COMPLETED,
+            amazon_products_count=1,
+            flipkart_results_count=2,
+            successful_count=1,
+            started_at=timezone.now(),
+            completed_at=timezone.now(),
+        )
+        first = FlipkartSearchResult.objects.create(
+            amazon_product=amazon,
+            pid="MOBPHONE012",
+            title="Apple iPhone 256 GB Variant",
+            product_url="https://www.flipkart.com/product/p/itm?pid=MOBPHONE012",
+            position=2,
+            processed=False,
+        )
+        first.batches.add(batch)
+        for result in amazon.flipkart_results.all():
+            result.batches.add(batch)
+        model_admin = admin.site._registry[SearchKeyword]
+
+        self.assertEqual(model_admin.total_flipkart_results(keyword), 2)
+
+    def test_search_keyword_admin_flipkart_summary_uses_running_batch_progress(self):
+        keyword = SearchKeyword.objects.create(keyword="running-summary")
+        source = AmazonProduct.objects.create(
+            asin="FKKWTESTSUMMARY001",
+            product_title="running-summary",
+            url="https://www.flipkart.com/search?q=running-summary",
+            status=ImportStatus.COMPLETED,
+        )
+        result = FlipkartSearchResult.objects.create(
+            amazon_product=source,
+            pid="MOBRUNSUMMARY1",
+            title="Running Summary Laptop 1",
+            product_url="https://www.flipkart.com/product/p/itm?pid=MOBRUNSUMMARY1",
+            position=1,
+            processed=False,
+        )
+        ImportBatch.objects.create(
+            keyword=keyword,
+            status=BatchStatus.FLIPKART_SEARCH,
+            amazon_products_count=1,
+            successful_count=1,
+            failed_count=0,
+            flipkart_results_count=1,
+            started_at=timezone.now(),
+        )
+        result.batches.add(keyword.import_batches.first())
+        model_admin = admin.site._registry[SearchKeyword]
+
+        self.assertEqual(
+            model_admin.flipkart_search_summary(keyword),
+            "1/1 searched · 1 candidates · Running",
+        )
+
+    def test_flipkart_search_filter_matches_keyword_statuses(self):
+        pending_keyword = SearchKeyword.objects.create(keyword="pending")
+        completed_keyword, completed_amazon, _ = self.make_pair(
+            "completed", "B0LAPTOP0005", "MOBLAPTOP005", "Dell Laptop 256 GB"
+        )
+        running_keyword = SearchKeyword.objects.create(keyword="running")
+        failed_keyword = SearchKeyword.objects.create(keyword="failed")
+
+        running_amazon = AmazonProduct.objects.create(
+            asin="B0RUNNING001",
+            product_title="Running Laptop",
+            brand="Dell",
+            storage="256 GB",
+            url="https://www.amazon.in/dp/B0RUNNING001",
+            status=ImportStatus.COMPLETED,
+        )
+        AmazonSearchResult.objects.create(
+            keyword=running_keyword,
+            asin=running_amazon.asin,
+            title=running_amazon.product_title,
+            product_url=running_amazon.url,
+            position=1,
+            processed=True,
+        )
+        second_running = AmazonProduct.objects.create(
+            asin="B0RUNNING002",
+            product_title="Running Laptop 2",
+            brand="Dell",
+            storage="256 GB",
+            url="https://www.amazon.in/dp/B0RUNNING002",
+            status=ImportStatus.COMPLETED,
+        )
+        AmazonSearchResult.objects.create(
+            keyword=running_keyword,
+            asin=second_running.asin,
+            title=second_running.product_title,
+            product_url=second_running.url,
+            position=2,
+            processed=True,
+        )
+        FlipkartSearchResult.objects.create(
+            amazon_product=running_amazon,
+            pid="MOBRUNNING001",
+            title="Running Laptop",
+            product_url="https://www.flipkart.com/product/p/itm?pid=MOBRUNNING001",
+            position=1,
+            processed=False,
+        )
+
+        failed_amazon = AmazonProduct.objects.create(
+            asin="B0FAILED001",
+            product_title="Failed Laptop",
+            brand="Dell",
+            storage="256 GB",
+            url="https://www.amazon.in/dp/B0FAILED001",
+            status=ImportStatus.COMPLETED,
+        )
+        AmazonSearchResult.objects.create(
+            keyword=failed_keyword,
+            asin=failed_amazon.asin,
+            title=failed_amazon.product_title,
+            product_url=failed_amazon.url,
+            position=1,
+            processed=True,
+        )
+        ImportBatch.objects.create(
+            keyword=failed_keyword,
+            status=BatchStatus.FAILED,
+            error_message=f"Flipkart search for {failed_amazon.asin}: Flipkart timed out",
+        )
+
+        model_admin = admin.site._registry[SearchKeyword]
+
+        def filtered_keywords(value):
+            request = self.factory.get("/admin/importer/searchkeyword/", {"flipkart_search_status": value})
+            filter_instance = FlipkartSearchStatusFilter(
+                request,
+                request.GET.copy(),
+                SearchKeyword,
+                model_admin,
+            )
+            return set(
+                filter_instance.queryset(
+                    request,
+                    SearchKeyword.objects.order_by("keyword"),
+                ).values_list("keyword", flat=True)
+            )
+
+        self.assertEqual(filtered_keywords(ImportStatus.PENDING), {"pending"})
+        self.assertEqual(filtered_keywords(ImportStatus.COMPLETED), {"completed"})
+        self.assertEqual(filtered_keywords(ImportStatus.RUNNING), {"running"})
+        self.assertEqual(filtered_keywords(ImportStatus.FAILED), {"failed"})
 
     def test_matching_is_scoped_to_selected_keyword_and_uses_existing_records(self):
         laptop_keyword, laptop_amazon, laptop_flipkart = self.make_pair(
@@ -1869,6 +2176,262 @@ class ImportBatchTests(TestCase):
             self.assertIn(action, batch_admin.actions)
 
 
+class MarketplaceIndependentPublishingTests(TestCase):
+    def setUp(self):
+        self.category = Category.objects.create(name="Mobiles", slug="mobiles")
+        self.amazon = AmazonProduct.objects.create(
+            asin="B0INDEPENDENT1",
+            product_title="Independent Phone",
+            brand="Example",
+            url="https://www.amazon.in/dp/B0INDEPENDENT1",
+            status=ImportStatus.COMPLETED,
+            current_selling_price_inr=50000,
+            mrp_inr=60000,
+        )
+        self.flipkart_result = FlipkartSearchResult.objects.create(
+            pid="MOBINDEPENDENT1",
+            title="Independent Phone",
+            product_url="https://www.flipkart.com/phone/p?pid=MOBINDEPENDENT1",
+            position=1,
+        )
+        self.flipkart = FlipkartProduct.objects.create(
+            search_result=self.flipkart_result,
+            pid="MOBINDEPENDENT1",
+            product_title="Independent Phone",
+            brand="Example",
+            url=self.flipkart_result.product_url,
+            status=ImportStatus.COMPLETED,
+            current_selling_price_inr=48000,
+            mrp_inr=60000,
+        )
+
+    def test_amazon_only_product_can_be_published(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+
+        product = publish_amazon_product(self.amazon)
+
+        self.assertEqual(Product.objects.count(), 1)
+        self.assertTrue(ProductPrice.objects.filter(product=product, platform="AMAZON").exists())
+        self.assertFalse(ProductPrice.objects.filter(product=product, platform="FLIPKART").exists())
+
+    def test_flipkart_only_product_can_be_published(self):
+        self.flipkart.categories.set([self.category])
+        approve_flipkart_product(self.flipkart)
+
+        product = publish_flipkart_product(self.flipkart)
+
+        self.assertEqual(Product.objects.count(), 1)
+        self.assertFalse(ProductPrice.objects.filter(product=product, platform="AMAZON").exists())
+        self.assertTrue(ProductPrice.objects.filter(product=product, platform="FLIPKART").exists())
+
+    def test_flipkart_primary_image_is_transferred_without_download(self):
+        self.flipkart.images = ["https://rukminim.example/phone.jpg"]
+        self.flipkart.save(update_fields=["images", "updated_at"])
+        self.flipkart.categories.set([self.category])
+        approve_flipkart_product(self.flipkart)
+
+        product = publish_flipkart_product(self.flipkart)
+
+        self.assertEqual(product.marketplace_image_url, "https://rukminim.example/phone.jpg")
+
+    def test_both_marketplaces_share_one_product(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        product = publish_amazon_product(self.amazon)
+
+        associate_flipkart_product(self.flipkart, product)
+
+        self.assertEqual(Product.objects.count(), 1)
+        self.assertEqual(ProductPrice.objects.filter(product=product).count(), 2)
+        self.assertEqual(self.flipkart.published_product_id, product.pk)
+
+    def test_marketplace_prices_update_independently(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        product = publish_amazon_product(self.amazon)
+        associate_flipkart_product(self.flipkart, product)
+
+        self.amazon.current_selling_price_inr = 47000
+        self.amazon.save(update_fields=["current_selling_price_inr", "updated_at"])
+        publish_amazon_product(self.amazon)
+        self.assertEqual(
+            ProductPrice.objects.get(product=product, platform="AMAZON").price,
+            47000,
+        )
+        self.assertEqual(
+            ProductPrice.objects.get(product=product, platform="FLIPKART").price,
+            48000,
+        )
+
+        self.flipkart.current_selling_price_inr = 45000
+        self.flipkart.save(update_fields=["current_selling_price_inr", "updated_at"])
+        associate_flipkart_product(self.flipkart, product)
+        self.assertEqual(
+            ProductPrice.objects.get(product=product, platform="AMAZON").price,
+            47000,
+        )
+        self.assertEqual(
+            ProductPrice.objects.get(product=product, platform="FLIPKART").price,
+            45000,
+        )
+
+    def test_unlinking_flipkart_keeps_canonical_product(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        product = publish_amazon_product(self.amazon)
+        associate_flipkart_product(self.flipkart, product)
+
+        unpublish_flipkart_product(self.flipkart)
+
+        self.assertTrue(Product.objects.filter(pk=product.pk).exists())
+        self.assertTrue(Product.objects.public().filter(pk=product.pk).exists())
+        self.assertFalse(ProductPrice.objects.filter(product=product, platform="FLIPKART").exists())
+
+    def test_public_cards_show_only_available_marketplaces_and_lowest_price(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        product = publish_amazon_product(self.amazon)
+        from apps.products.services import build_product_card
+
+        product.list_prices = list(product.prices.all())
+        card = build_product_card(product, price_attribute="list_prices")
+        self.assertTrue(card["has_amazon"])
+        self.assertFalse(card["has_flipkart"])
+        self.assertTrue(card["is_amazon_lowest"])
+
+        associate_flipkart_product(self.flipkart, product)
+        product.list_prices = list(product.prices.all())
+        card = build_product_card(product, price_attribute="list_prices")
+        self.assertTrue(card["has_amazon"])
+        self.assertTrue(card["has_flipkart"])
+        self.assertTrue(card["is_flipkart_lowest"])
+
+        unpublish_flipkart_product(self.flipkart)
+        product.list_prices = list(product.prices.all())
+        card = build_product_card(product, price_attribute="list_prices")
+        self.assertTrue(card["has_amazon"])
+        self.assertFalse(card["has_flipkart"])
+
+    def test_public_detail_handles_missing_marketplace_data(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        publish_amazon_product(self.amazon)
+
+        response = self.client.get("/product/independent-phone/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Buy on Amazon")
+        self.assertNotContains(response, "Buy on Flipkart")
+
+    def test_flipkart_bulk_category_action_assigns_multiple_products_and_categories(self):
+        second_result = FlipkartSearchResult.objects.create(
+            pid="MOBINDEPENDENT2",
+            title="Independent Tablet",
+            product_url="https://www.flipkart.com/tablet/p?pid=MOBINDEPENDENT2",
+            position=2,
+        )
+        second = FlipkartProduct.objects.create(
+            search_result=second_result,
+            pid="MOBINDEPENDENT2",
+            product_title="Independent Tablet",
+            url="https://www.flipkart.com/tablet/p?pid=MOBINDEPENDENT2",
+            status=ImportStatus.COMPLETED,
+        )
+        second_category = Category.objects.create(name="Tablets", slug="tablets")
+        model_admin = FlipkartProductAdmin(FlipkartProduct, admin.site)
+        request = RequestFactory().post(
+            "/admin/importer/flipkartproduct/assign-categories/",
+            {
+                "ids": f"{self.flipkart.pk},{second.pk}",
+                "categories": [str(self.category.pk), str(second_category.pk)],
+            },
+        )
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, is_staff=True)
+
+        with patch.object(model_admin, "message_user"):
+            response = model_admin.assign_categories_view(request)
+
+        self.assertEqual(response.status_code, 302)
+        expected = {self.category.pk, second_category.pk}
+        self.assertEqual(set(self.flipkart.categories.values_list("pk", flat=True)), expected)
+        self.assertEqual(set(second.categories.values_list("pk", flat=True)), expected)
+
+    def test_flipkart_bulk_category_action_redirects_to_confirmation(self):
+        model_admin = FlipkartProductAdmin(FlipkartProduct, admin.site)
+        request = RequestFactory().post("/admin/importer/flipkartproduct/")
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, is_staff=True)
+
+        response = model_admin.assign_categories(
+            request,
+            FlipkartProduct.objects.filter(pk=self.flipkart.pk),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("assign-categories/", response.url)
+        self.assertIn(str(self.flipkart.pk), response.url)
+
+    def test_flipkart_bulk_category_action_rejects_empty_selection(self):
+        model_admin = FlipkartProductAdmin(FlipkartProduct, admin.site)
+        request = RequestFactory().post(
+            "/admin/importer/flipkartproduct/assign-categories/",
+            {"ids": str(self.flipkart.pk)},
+        )
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, is_staff=True)
+
+        with patch.object(model_admin.admin_site, "each_context", return_value={}):
+            response = model_admin.assign_categories_view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "This field is required")
+        self.assertFalse(self.flipkart.categories.exists())
+
+    def test_flipkart_bulk_category_assignment_preserves_existing_categories(self):
+        second_category = Category.objects.create(name="Tablets", slug="tablets")
+        self.flipkart.categories.add(self.category)
+
+        assign_staged_product_categories(
+            FlipkartProduct,
+            [self.flipkart.pk],
+            [second_category],
+        )
+
+        self.assertEqual(
+            set(self.flipkart.categories.values_list("pk", flat=True)),
+            {self.category.pk, second_category.pk},
+        )
+
+    def test_flipkart_bulk_category_assignment_rolls_back_on_failure(self):
+        second_result = FlipkartSearchResult.objects.create(
+            pid="MOBINDEPENDENT2",
+            title="Independent Tablet",
+            product_url="https://www.flipkart.com/tablet/p?pid=MOBINDEPENDENT2",
+            position=2,
+        )
+        second = FlipkartProduct.objects.create(
+            search_result=second_result,
+            pid="MOBINDEPENDENT2",
+            product_title="Independent Tablet",
+            url="https://www.flipkart.com/tablet/p?pid=MOBINDEPENDENT2",
+            status=ImportStatus.COMPLETED,
+        )
+        manager_class = type(self.flipkart.categories)
+        with patch.object(
+            manager_class,
+            "add",
+            side_effect=[None, RuntimeError("category assignment failed")],
+        ):
+            with self.assertRaises(RuntimeError):
+                assign_staged_product_categories(
+                    FlipkartProduct,
+                    [self.flipkart.pk, second.pk],
+                    [self.category],
+                )
+
+        self.assertFalse(self.flipkart.categories.exists())
+        self.assertFalse(second.categories.exists())
+
+
 class AdminProvisioningCommandTests(TestCase):
     command_environment = {
         "ADMIN_USERNAME": "railway-admin",
@@ -1925,3 +2488,187 @@ class AdminProvisioningCommandTests(TestCase):
         self.assertEqual(user.password, original_password_hash)
         self.assertFalse(user.is_staff)
         self.assertIn("already exists", output)
+
+
+class AmazonPublishingWorkflowTests(TestCase):
+    def setUp(self):
+        self.category = Category.objects.create(name="Mobiles", slug="mobiles")
+        self.other_category = Category.objects.create(
+            name="Accessories", slug="accessories", display_order=2
+        )
+        self.category.display_order = 1
+        self.category.save(update_fields=["display_order"])
+        self.amazon = AmazonProduct.objects.create(
+            asin="B0WORKFLOW01",
+            product_title="Workflow Phone",
+            brand="Example",
+            url="https://www.amazon.in/dp/B0WORKFLOW01",
+            status=ImportStatus.COMPLETED,
+            images=["https://images.example/workflow-phone.jpg"],
+            current_selling_price_inr=29999,
+            mrp_inr=34999,
+        )
+
+    def test_extracted_product_is_in_amazon_admin_queryset_and_pending(self):
+        model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
+
+        self.assertIn(self.amazon, model_admin.get_queryset(RequestFactory().get("/admin/")))
+        self.assertIn("https://images.example", str(model_admin.image_preview(self.amazon)))
+        self.assertEqual(self.amazon.approval_status, "pending")
+        self.assertFalse(self.amazon.published)
+
+    def test_bulk_category_action_redirects_to_confirmation_page(self):
+        model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
+        request = RequestFactory().post("/admin/importer/amazonproduct/")
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, is_staff=True)
+
+        response = model_admin.assign_categories(
+            request,
+            AmazonProduct.objects.filter(pk=self.amazon.pk),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("assign-categories/", response.url)
+        self.assertIn(str(self.amazon.pk), response.url)
+
+    def test_bulk_category_action_assigns_multiple_categories_to_multiple_products(self):
+        second_amazon = AmazonProduct.objects.create(
+            asin="B0WORKFLOW02",
+            product_title="Workflow Laptop",
+            url="https://www.amazon.in/dp/B0WORKFLOW02",
+            status=ImportStatus.COMPLETED,
+        )
+        self.amazon.categories.add(self.category)
+        model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
+        request = RequestFactory().post(
+            "/admin/importer/amazonproduct/assign-categories/",
+            {
+                "ids": f"{self.amazon.pk},{second_amazon.pk}",
+                "categories": [str(self.category.pk), str(self.other_category.pk)],
+            },
+        )
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, is_staff=True)
+
+        with patch.object(model_admin, "message_user"):
+            response = model_admin.assign_categories_view(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            set(self.amazon.categories.values_list("pk", flat=True)),
+            {self.category.pk, self.other_category.pk},
+        )
+        self.assertEqual(
+            set(second_amazon.categories.values_list("pk", flat=True)),
+            {self.category.pk, self.other_category.pk},
+        )
+
+    def test_bulk_category_action_rejects_empty_selection_without_mutation(self):
+        model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
+        request = RequestFactory().post(
+            "/admin/importer/amazonproduct/assign-categories/",
+            {"ids": str(self.amazon.pk)},
+        )
+        request.user = SimpleNamespace(is_authenticated=True, is_active=True, is_staff=True)
+
+        with patch.object(model_admin.admin_site, "each_context", return_value={}):
+            response = model_admin.assign_categories_view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "This field is required")
+        self.assertFalse(self.amazon.categories.exists())
+
+    def test_bulk_category_assignment_preserves_existing_categories_and_is_publishable(self):
+        assign_amazon_product_categories(
+            [self.amazon.pk],
+            [self.category],
+        )
+        assign_amazon_product_categories(
+            [self.amazon.pk],
+            [self.other_category],
+        )
+        approve_amazon_product(self.amazon)
+
+        product = publish_amazon_product(self.amazon)
+
+        self.assertEqual(
+            set(self.amazon.categories.values_list("pk", flat=True)),
+            {self.category.pk, self.other_category.pk},
+        )
+        self.assertEqual(product.category_id, self.category.pk)
+
+    def test_pending_product_cannot_publish(self):
+        with self.assertRaises(PublishValidationError):
+            publish_amazon_product(self.amazon)
+        self.assertFalse(Product.objects.exists())
+
+    def test_approval_is_separate_from_publishing(self):
+        approve_amazon_product(self.amazon)
+
+        self.amazon.refresh_from_db()
+        self.assertEqual(self.amazon.approval_status, "approved")
+        self.assertFalse(self.amazon.published)
+        self.assertFalse(Product.objects.exists())
+
+    def test_publishing_requires_category(self):
+        approve_amazon_product(self.amazon)
+
+        with self.assertRaises(PublishValidationError):
+            publish_amazon_product(self.amazon)
+        self.assertFalse(Product.objects.exists())
+
+    def test_publishing_with_categories_creates_public_product_and_price(self):
+        self.amazon.categories.set([self.category, self.other_category])
+        approve_amazon_product(self.amazon)
+
+        product = publish_amazon_product(self.amazon)
+
+        self.amazon.refresh_from_db()
+        self.assertTrue(self.amazon.published)
+        self.assertEqual(self.amazon.published_product, product)
+        self.assertEqual(product.category, self.category)
+        self.assertTrue(Product.objects.public().filter(pk=product.pk).exists())
+        self.assertEqual(
+            ProductPrice.objects.get(product=product, platform=ProductPrice.Platform.AMAZON).price,
+            29999,
+        )
+
+    def test_unpublishing_removes_product_from_public_listing(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        product = publish_amazon_product(self.amazon)
+
+        unpublish_amazon_product(self.amazon)
+
+        self.assertFalse(Product.objects.public().filter(pk=product.pk).exists())
+        self.assertNotContains(self.client.get("/products/"), "Workflow Phone")
+
+    def test_amazon_image_url_is_preferred_and_uploaded_image_is_fallback(self):
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+        product = publish_amazon_product(self.amazon)
+        from apps.products.services import build_product_card
+
+        product = Product.objects.prefetch_related("amazon_products").get(pk=product.pk)
+        product.list_prices = list(product.prices.all())
+        card = build_product_card(product, price_attribute="list_prices")
+        self.assertEqual(card["image_url"], "https://images.example/workflow-phone.jpg")
+
+        self.amazon.images = []
+        self.amazon.save(update_fields=["images", "updated_at"])
+        product.marketplace_image_url = ""
+        product.featured_image = "products/featured/fallback.jpg"
+        product.save(update_fields=["marketplace_image_url", "featured_image", "updated_at"])
+        product = Product.objects.prefetch_related("amazon_products").get(pk=product.pk)
+        product.list_prices = list(product.prices.all())
+        card = build_product_card(product, price_attribute="list_prices")
+        self.assertTrue(card["image_url"].endswith("/media/products/featured/fallback.jpg"))
+
+    def test_publishing_transfers_first_marketplace_image_url_to_product(self):
+        self.amazon.images = ["", "https://images.example/primary.jpg"]
+        self.amazon.save(update_fields=["images", "updated_at"])
+        self.amazon.categories.set([self.category])
+        approve_amazon_product(self.amazon)
+
+        product = publish_amazon_product(self.amazon)
+
+        self.assertEqual(product.marketplace_image_url, "https://images.example/primary.jpg")

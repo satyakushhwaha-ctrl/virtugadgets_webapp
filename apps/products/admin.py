@@ -25,6 +25,9 @@ class ProductAdmin(admin.ModelAdmin):
         "title",
         "category",
         "brand",
+        "marketplace_image_preview",
+        "amazon_offer_status",
+        "flipkart_offer_status",
         "rating",
         "review_count",
         "is_active",
@@ -33,7 +36,7 @@ class ProductAdmin(admin.ModelAdmin):
     list_filter = ("is_active", "category", "brand", "created_at", "updated_at")
     search_fields = ("title", "slug", "brand", "short_description", "description")
     ordering = ("title",)
-    readonly_fields = ("id", "image_preview", "created_at", "updated_at")
+    readonly_fields = ("id", "image_preview", "marketplace_image_preview", "created_at", "updated_at")
     prepopulated_fields = {"slug": ("title",)}
     autocomplete_fields = ("category",)
     list_select_related = ("category",)
@@ -41,14 +44,33 @@ class ProductAdmin(admin.ModelAdmin):
 
     @admin.display(description="Image")
     def image_preview(self, obj: Product) -> str:
-        if not obj.featured_image:
+        image_url = obj.marketplace_image_url or (obj.featured_image.url if obj.featured_image else "")
+        if not image_url:
             return "-"
 
         return format_html(
             '<img src="{}" alt="{}" width="48" height="48" />',
-            obj.featured_image.url,
+            image_url,
             obj.title,
         )
+
+    @admin.display(description="Marketplace image")
+    def marketplace_image_preview(self, obj: Product) -> str:
+        if not obj.marketplace_image_url:
+            return "-"
+        return format_html(
+            '<img src="{}" alt="{}" width="96" height="96" style="object-fit:contain" />',
+            obj.marketplace_image_url,
+            obj.title,
+        )
+
+    @admin.display(description="Amazon")
+    def amazon_offer_status(self, obj: Product) -> str:
+        return "✓" if obj.amazon_products.filter(published=True).exists() else "—"
+
+    @admin.display(description="Flipkart")
+    def flipkart_offer_status(self, obj: Product) -> str:
+        return "✓" if obj.flipkart_products.filter(published=True).exists() else "—"
 
 
 @admin.register(ProductPrice)

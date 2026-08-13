@@ -8,10 +8,12 @@ from django.shortcuts import redirect
 from django.views.generic import DetailView, ListView
 
 from apps.categories.models import Category
+from apps.importer.models import AmazonProduct, FlipkartProduct, ProductMatch
 from apps.products.models import Product, ProductPrice
 from apps.products.services import (
     build_product_card,
     build_product_detail_context,
+    get_product_image_urls,
     get_product_detail_queryset,
     get_related_product_cards,
     get_search_queryset,
@@ -27,11 +29,31 @@ class ProductListView(ListView):
     def get_queryset(self) -> QuerySet[Product]:
         category_slug = self.request.GET.get("category")
         prices = ProductPrice.objects.order_by("platform")
+        image_source_matches = ProductMatch.objects.filter(
+            match_status="published",
+        ).select_related("amazon_product")
 
         queryset = (
             Product.objects.public()
             .select_related("category")
-            .prefetch_related(Prefetch("prices", queryset=prices, to_attr="list_prices"))
+            .prefetch_related(
+                Prefetch("prices", queryset=prices, to_attr="list_prices"),
+                Prefetch(
+                    "importer_product_matches",
+                    queryset=image_source_matches,
+                    to_attr="image_source_matches",
+                ),
+                Prefetch(
+                    "amazon_products",
+                    queryset=AmazonProduct.objects.filter(published=True),
+                    to_attr="published_amazon_products",
+                ),
+                Prefetch(
+                    "flipkart_products",
+                    queryset=FlipkartProduct.objects.filter(published=True),
+                    to_attr="published_flipkart_products",
+                ),
+            )
             .order_by("-created_at")
         )
 
@@ -106,11 +128,9 @@ class ProductDetailView(DetailView):
         canonical_url = self.request.build_absolute_uri(
             reverse("product-detail", kwargs={"slug": product.slug})
         )
-        image_url = (
-            self.request.build_absolute_uri(product.featured_image.url)
-            if product.featured_image
-            else ""
-        )
+        image_url, _ = get_product_image_urls(product)
+        if image_url.startswith("/"):
+            image_url = self.request.build_absolute_uri(image_url)
         context.update(
             build_product_detail_context(
                 product,

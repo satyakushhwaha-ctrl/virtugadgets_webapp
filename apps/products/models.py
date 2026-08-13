@@ -39,6 +39,12 @@ class Product(models.Model):
         blank=True,
         verbose_name="Featured image",
     )
+    marketplace_image_url = models.URLField(
+        max_length=2048,
+        blank=True,
+        verbose_name="Marketplace image URL",
+        help_text="Remote Amazon or Flipkart image URL; used before the uploaded image.",
+    )
     short_description = models.CharField(
         max_length=255,
         blank=True,
