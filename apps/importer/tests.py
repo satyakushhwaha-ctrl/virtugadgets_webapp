@@ -1,13 +1,15 @@
 import os
+import tempfile
 from io import StringIO
 from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from pathlib import Path
+from unittest.mock import ANY, MagicMock, patch
 
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
 from django.db import IntegrityError
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from .models import (
@@ -42,6 +44,12 @@ from .services.flipkart_search import (
 from .services.flipkart_search_results import search_and_save_flipkart_candidates
 from .services.flipkart_search_results import run_flipkart_search_for_keyword
 from .services.amazon_search import search_amazon
+from .services.amazon_search import (
+    PRODUCT_SELECTORS,
+    AmazonSearchScrapingError,
+    _blocking_reason,
+    _scrape_search_results,
+)
 from .services.flipkart_product import (
     extract_flipkart_product,
     process_flipkart_search_result,
@@ -264,6 +272,7 @@ class ImporterTests(TestCase):
         self.assertEqual(results[0]["product_url"], "https://www.amazon.in/dp/B000000001")
         self.assertEqual(results[1]["asin"], "B000000002")
         scraper.assert_called_once_with("iphone 16")
+
 
     @patch("apps.importer.services.amazon_search_results.amazon_search.search_amazon")
     def test_management_command_saves_results(self, scraper):
@@ -993,6 +1002,114 @@ class ImporterTests(TestCase):
         )
         best_match = ProductMatch.objects.get(flipkart_product=best)
         self.assertEqual(best_match.match_status, "matched")
+
+
+class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
+    def _page(self, body_text, *, products=False, selector_timeout=False):
+        page = MagicMock()
+        page.url = "https://www.amazon.in/s?k=iphone+16"
+        page.title.return_value = "Amazon.in Search"
+        page.content.return_value = f"<html><body>{body_text}</body></html>"
+        body = MagicMock()
+        body.inner_text.return_value = body_text
+        product_items = MagicMock()
+        product_items.count.return_value = 1
+        item = MagicMock()
+        item.get_attribute.return_value = "B000000001"
+        item.inner_text.return_value = "Example phone"
+        link = MagicMock()
+        link.count.return_value = 1
+        link.first.get_attribute.return_value = "/dp/B000000001"
+        title = MagicMock()
+        title.count.return_value = 1
+        title.first.inner_text.return_value = "Example phone"
+        item.locator.side_effect = lambda selector: link if selector.startswith("h2 a") else title
+        product_items.nth.return_value = item
+
+        def locator(selector):
+            if selector == "body":
+                return body
+            if products and selector in PRODUCT_SELECTORS:
+                return product_items
+            empty = MagicMock()
+            empty.count.return_value = 0
+            return empty
+
+        page.locator.side_effect = locator
+        if selector_timeout:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            page.wait_for_selector.side_effect = PlaywrightTimeoutError("selector timeout")
+        return page
+
+    def _runtime(self, page):
+        runtime = MagicMock()
+        browser = MagicMock()
+        context = MagicMock()
+        context.new_page.return_value = page
+        browser.new_context.return_value = context
+        runtime.chromium.launch.return_value = browser
+        manager = MagicMock()
+        manager.__enter__.return_value = runtime
+        manager.__exit__.return_value = False
+        return manager, browser, context
+
+    @patch("playwright.sync_api.sync_playwright")
+    def test_normal_search_results_use_fallback_aware_scraper(self, sync):
+        page = self._page("Example phone", products=True)
+        manager, browser, context = self._runtime(page)
+        sync.return_value = manager
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"PLAYWRIGHT_DIAGNOSTICS_DIR": directory}):
+                results = _scrape_search_results("iphone 16")
+
+        self.assertEqual(results[0]["asin"], "B000000001")
+        self.assertEqual(results[0]["title"], "Example phone")
+        context.close.assert_called_once()
+        browser.close.assert_called_once()
+
+    def test_captcha_page_is_classified_as_blocked(self):
+        diagnostics = {
+            "url": "https://www.amazon.in/errors/validateCaptcha",
+            "title": "Robot Check",
+            "body_text": "Enter the characters you see below",
+            "html_snippet": "captcha",
+        }
+        self.assertEqual(_blocking_reason(diagnostics), "captcha")
+
+    def test_empty_page_raises_diagnostic_exception_with_artifacts(self):
+        page = self._page("", products=False)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"PLAYWRIGHT_DIAGNOSTICS_DIR": directory}):
+                with self.assertRaises(AmazonSearchScrapingError) as raised:
+                    from .services.amazon_search import _raise_unexpected_page
+                    _raise_unexpected_page(page, "iphone 16", {
+                        "url": page.url,
+                        "title": page.title(),
+                        "body_text": "",
+                        "html_snippet": "<body></body>",
+                        "html": "<html><body></body></html>",
+                    })
+        self.assertIn("product selectors were not found", str(raised.exception))
+        self.assertIn("page.png", str(raised.exception))
+        self.assertIn("page.html", str(raised.exception))
+
+    @patch("playwright.sync_api.sync_playwright")
+    def test_selector_timeout_raises_meaningful_diagnostic_exception(self, sync):
+        page = self._page("Amazon search", selector_timeout=True)
+        manager, browser, context = self._runtime(page)
+        sync.return_value = manager
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"PLAYWRIGHT_DIAGNOSTICS_DIR": directory}):
+                with self.assertRaises(AmazonSearchScrapingError) as raised:
+                    _scrape_search_results("iphone 16")
+
+        message = str(raised.exception)
+        self.assertIn("URL: https://www.amazon.in/s?k=iphone+16", message)
+        self.assertIn("title: Amazon.in Search", message)
+        context.close.assert_called_once()
+        browser.close.assert_called_once()
 
 
 class ImporterAdminTests(TestCase):

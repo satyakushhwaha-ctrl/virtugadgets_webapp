@@ -153,6 +153,7 @@ def _scrape_search_results(query: str) -> list[dict]:
     with sync_playwright() as playwright:
         browser = None
         context = None
+        page = None
         try:
             browser = playwright.chromium.launch(
                 headless=is_headless(),
@@ -262,6 +263,11 @@ def _scrape_search_results(query: str) -> list[dict]:
                 position += 1
             return rows
         finally:
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    logger.debug("Could not close Flipkart search page", exc_info=True)
             if context:
                 context.close()
             if browser:

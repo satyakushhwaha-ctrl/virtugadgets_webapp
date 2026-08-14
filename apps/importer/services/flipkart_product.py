@@ -95,6 +95,7 @@ def fetch_flipkart_page_data_with_playwright(url: str) -> dict:
   with sync_playwright() as p:
     browser = None
     context = None
+    page = None
     try:
       browser = p.chromium.launch(
           headless=is_headless(),
@@ -152,6 +153,11 @@ def fetch_flipkart_page_data_with_playwright(url: str) -> dict:
       print(f"Playwright fetch warning: {e}")
       return {"imageUrls": [], "fullBodyText": ""}
     finally:
+      if page:
+        try:
+          page.close()
+        except Exception:
+          pass
       if context:
         context.close()
       if browser:
