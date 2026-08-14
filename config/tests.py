@@ -1,9 +1,11 @@
 from django.conf import settings
 from django.test import SimpleTestCase
+from unittest.mock import patch
 
 from apps.core.tasks import celery_health_check
 from config.celery import app as celery_app
 from config.settings import _hostname, _https_origin, _unique
+from apps.importer.services.playwright import is_headless
 
 
 class ProductionHostConfigurationTests(SimpleTestCase):
@@ -35,3 +37,11 @@ class CeleryConfigurationTests(SimpleTestCase):
     def test_redis_configuration_uses_a_redis_url(self):
         self.assertTrue(settings.REDIS_URL.startswith("redis://"))
         self.assertEqual(settings.CELERY_RESULT_BACKEND, settings.REDIS_URL)
+
+    def test_playwright_is_headless_by_default_and_configurable(self):
+        with patch.dict("os.environ", {}, clear=False):
+            # The process environment may contain an explicit deployment value.
+            with patch.dict("os.environ", {"PLAYWRIGHT_HEADLESS": "true"}):
+                self.assertTrue(is_headless())
+            with patch.dict("os.environ", {"PLAYWRIGHT_HEADLESS": "false"}):
+                self.assertFalse(is_headless())

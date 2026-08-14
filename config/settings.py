@@ -133,8 +133,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 
 # Database
-DATABASES = {
-    'default': {
+database_url = env("DATABASE_URL", default="").strip()
+if database_url:
+    database = env.db_url("DATABASE_URL")
+    database["CONN_MAX_AGE"] = env.int("DB_CONN_MAX_AGE", default=60)
+else:
+    database = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': env('DB_NAME'),
         'USER': env('DB_USER'),
@@ -143,7 +147,7 @@ DATABASES = {
         'PORT': env.int('DB_PORT'),
         'CONN_MAX_AGE': env.int('DB_CONN_MAX_AGE', default=60),
     }
-}
+DATABASES = {'default': database}
 
 
 # Password validation

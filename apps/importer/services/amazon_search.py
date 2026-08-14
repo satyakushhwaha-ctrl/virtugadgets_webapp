@@ -46,35 +46,37 @@ def _scrape_search_results(keyword: str) -> list[dict]:
     # Keep Playwright lazy so Django checks and unit tests do not require a
     # browser installation unless a real search is actually requested.
     from playwright.sync_api import sync_playwright
+    from .playwright import is_headless
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=False,
-            slow_mo=100,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-infobars",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/138.0.0.0 Safari/537.36"
-            ),
-        )
-        page = context.new_page()
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', "
-            "{get: () => undefined})"
-        )
-
+        browser = None
+        context = None
         try:
+            browser = playwright.chromium.launch(
+                headless=is_headless(),
+                slow_mo=100,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-infobars",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/138.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', "
+                "{get: () => undefined})"
+            )
             page.goto(
                 SEARCH_URL.format(keyword=quote_plus(keyword)),
                 wait_until="commit",
@@ -115,7 +117,10 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                 )
             return rows
         finally:
-            browser.close()
+            if context:
+                context.close()
+            if browser:
+                browser.close()
 
 
 def search_amazon(keyword: str) -> list[dict]:

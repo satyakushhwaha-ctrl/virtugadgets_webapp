@@ -20,7 +20,7 @@ RUN apt-get update \
 
 COPY . .
 
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh /app/worker-entrypoint.sh
 
 EXPOSE 8000
 

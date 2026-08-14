@@ -90,29 +90,31 @@ class FlipkartProductSchema(BaseModel):
 def fetch_flipkart_page_data_with_playwright(url: str) -> dict:
   """Robust Flipkart scraper capturing DOM details, text blocks, and gallery images."""
   from playwright.sync_api import sync_playwright
+  from .playwright import is_headless
 
   with sync_playwright() as p:
-    browser = p.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-infobars",
-        ],
-    )
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1440, "height": 900},
-        locale="en-IN",
-        timezone_id="Asia/Kolkata",
-    )
-    page = context.new_page()
-
+    browser = None
+    context = None
     try:
+      browser = p.chromium.launch(
+          headless=is_headless(),
+          args=[
+              "--disable-blink-features=AutomationControlled",
+              "--no-sandbox",
+              "--disable-infobars",
+          ],
+      )
+      context = browser.new_context(
+          user_agent=(
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/122.0.0.0 Safari/537.36"
+          ),
+          viewport={"width": 1440, "height": 900},
+          locale="en-IN",
+          timezone_id="Asia/Kolkata",
+      )
+      page = context.new_page()
       page.add_init_script(
           "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
       )
@@ -144,13 +146,16 @@ def fetch_flipkart_page_data_with_playwright(url: str) -> dict:
                 };
             }""")
 
-      browser.close()
       return extracted_data
 
     except Exception as e:
       print(f"Playwright fetch warning: {e}")
-      browser.close()
       return {"imageUrls": [], "fullBodyText": ""}
+    finally:
+      if context:
+        context.close()
+      if browser:
+        browser.close()
 
 
 def extract_flipkart_product_data(url: str) -> dict:

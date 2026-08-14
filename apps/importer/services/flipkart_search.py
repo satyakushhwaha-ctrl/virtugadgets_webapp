@@ -148,35 +148,37 @@ def _normalise_product_url(href: str | None) -> str | None:
 def _scrape_search_results(query: str) -> list[dict]:
     """Reuse the supplied Flipkart Playwright search behaviour."""
     from playwright.sync_api import sync_playwright
+    from .playwright import is_headless
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=False,
-            slow_mo=100,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-infobars",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/138.0.0.0 Safari/537.36"
-            ),
-        )
-        page = context.new_page()
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', "
-            "{get: () => undefined})"
-        )
-
+        browser = None
+        context = None
         try:
+            browser = playwright.chromium.launch(
+                headless=is_headless(),
+                slow_mo=100,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-infobars",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/138.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', "
+                "{get: () => undefined})"
+            )
             page.goto(
                 SEARCH_URL.format(query=quote_plus(query)),
                 wait_until="domcontentloaded",
@@ -260,7 +262,10 @@ def _scrape_search_results(query: str) -> list[dict]:
                 position += 1
             return rows
         finally:
-            browser.close()
+            if context:
+                context.close()
+            if browser:
+                browser.close()
 
 
 def search_flipkart(query: str) -> list[dict]:
