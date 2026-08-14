@@ -1,7 +1,7 @@
 import os
 from io import StringIO
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from django.contrib import admin
 from django.contrib.auth import get_user_model
@@ -22,6 +22,7 @@ from .models import (
     SearchKeyword,
 )
 from apps.categories.models import Category
+from apps.core.tasks import extract_best_matched_flipkart_product as best_match_task
 from apps.products.models import Product, ProductPrice
 from .admin import (
     AmazonProductAdmin,
@@ -50,6 +51,8 @@ from .services.product_matching import (
     match_products,
     normalize_capacity,
     normalize_color,
+    rank_flipkart_search_result,
+    rank_flipkart_search_results,
 )
 from .services.product_publisher import (
     PublishValidationError,
@@ -66,6 +69,7 @@ from .services.product_publisher import (
 )
 from .services.batch_runner import run_batch
 from .services.product_matching import run_product_matching_for_batch
+from .services.best_flipkart_match import extract_best_matched_flipkart_product
 
 
 MOCK_RESULTS = [
@@ -516,6 +520,27 @@ class ImporterTests(TestCase):
         self.assertEqual(summary.saved, 1)
         self.assertEqual(summary.candidates_selected, 1)
         self.assertEqual(product.flipkart_results.count(), 1)
+
+    @patch("apps.importer.services.flipkart_search_results.search_flipkart")
+    def test_best_match_search_can_persist_all_returned_candidates(self, search):
+        product = self.make_completed_amazon_product()
+        search.return_value = [
+            {
+                "pid": f"MOBALL{index:05d}",
+                "title": f"Apple iPhone candidate {index}",
+                "product_url": f"https://www.flipkart.com/phone/p/x?pid=MOBALL{index:05d}",
+                "position": index,
+                "sponsored": False,
+            }
+            for index in range(1, 23)
+        ]
+
+        summary = search_and_save_flipkart_candidates(product, candidate_limit=None)
+
+        self.assertEqual(summary.candidates_found, 22)
+        self.assertEqual(summary.candidates_selected, 22)
+        self.assertEqual(len(summary.candidate_pids), 22)
+        self.assertEqual(product.flipkart_results.count(), 22)
 
     @patch("apps.importer.management.commands.search_flipkart.search_and_save_flipkart_candidates")
     def test_search_flipkart_command_limit(self, search):
@@ -988,7 +1013,254 @@ class ImporterAdminTests(TestCase):
 
         self.assertIn("extract_amazon_products", model_admin.actions)
 
-    def test_amazon_search_result_admin_extracts_all_selected_results(self):
+    def make_best_match_product(self, asin="B0BEST000001"):
+        return AmazonProduct.objects.create(
+            asin=asin,
+            product_title="Apple iPhone 16 128 GB",
+            brand="Apple",
+            storage="128 GB",
+            url=f"https://www.amazon.in/dp/{asin}",
+            status=ImportStatus.COMPLETED,
+        )
+
+    def make_best_match_candidate(self, amazon, pid, title, position):
+        return FlipkartSearchResult.objects.create(
+            amazon_product=amazon,
+            pid=pid,
+            title=title,
+            product_url=f"https://www.flipkart.com/phone/p/x?pid={pid}",
+            position=position,
+        )
+
+    @patch("apps.importer.services.best_flipkart_match.search_and_save_flipkart_candidates")
+    @patch("apps.importer.services.flipkart_product.extract_flipkart_product")
+    def test_best_match_extracts_only_highest_ranked_candidate(self, extractor, search):
+        amazon = self.make_best_match_product()
+        best = self.make_best_match_candidate(
+            amazon, "BEST123", "Apple iPhone 16 128 GB", 2
+        )
+        lower = self.make_best_match_candidate(
+            amazon, "LOW123", "Apple iPhone 16 512 GB", 1
+        )
+        search.return_value = SimpleNamespace(
+            candidate_pids=(best.pid, lower.pid),
+        )
+        extractor.return_value = {**MOCK_FLIPKART_PRODUCT, "pid": best.pid}
+
+        result = extract_best_matched_flipkart_product(amazon)
+
+        self.assertEqual(result["status"], "extracted")
+        self.assertEqual(result["match"]["candidate"].pk, best.pk)
+        extractor.assert_called_once_with(best.product_url)
+        self.assertFalse(FlipkartSearchResult.objects.get(pk=lower.pk).processed)
+        self.assertTrue(FlipkartProduct.objects.filter(pid=best.pid).exists())
+        self.assertEqual(AmazonProduct.objects.count(), 1)
+        self.assertEqual(ProductMatch.objects.count(), 1)
+
+    def test_title_matching_prioritizes_laptop_identity_signals(self):
+        amazon = SimpleNamespace(
+            product_title=(
+                "HP Victus, AMD Ryzen 7 7445HS, 6GB RTX 4050, "
+                "16GB DDR5(Upgradeable) 512GB SSD, 144Hz, IPS, 300 nits, "
+                "15.6''/39.6cm, Win11, Office24, Blue, 2.29kg, fb3130AX, "
+                "DTS Audio, Xbox Gamepass*, Gaming Laptop"
+            ),
+            brand="HP",
+            processor="AMD Ryzen 7 7445HS",
+            ram="16 GB",
+            storage="512 GB",
+            operating_system="Windows 11",
+        )
+        candidates = [
+            "HP Victus AMD Ryzen 7 Hexa Core 7445HS (16 GB/512 GB SSD/Windows 11 Home/6 GB Graphics/NVIDIA GeForce RTX 4050) 15-fb3130AX Gaming Laptop",
+            "HP Victus Ryzen 5 7535HS 16GB 512GB RTX 3050",
+            "HP Victus Ryzen 7 7840HS 16GB 1TB RTX 4050",
+            "HP Victus generic laptop",
+        ]
+
+        ranked = [
+            rank_flipkart_search_result(
+                amazon,
+                SimpleNamespace(title=title, position=index, pk=str(index)),
+            )
+            for index, title in enumerate(candidates)
+        ]
+        ranked.sort(key=lambda result: result["score"], reverse=True)
+
+        self.assertGreaterEqual(ranked[0]["score"], 90)
+        self.assertEqual(ranked[0]["candidate"].title, candidates[0])
+        self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+
+    def test_exact_victus_title_matches_even_without_structured_amazon_specs(self):
+        amazon = SimpleNamespace(
+            product_title=(
+                "HP Victus, AMD Ryzen 7 7445HS, 6GB RTX 4050, "
+                "16GB DDR5(Upgradeable) 512GB SSD, 144Hz, IPS, 300 nits, "
+                "15.6''/39.6cm, Win11, Office24, Blue, 2.29kg, fb3130AX, "
+                "DTS Audio, Xbox Gamepass*, Gaming Laptop"
+            ),
+            brand="",
+            processor="",
+            ram="",
+            storage="",
+            operating_system="",
+        )
+        candidate = SimpleNamespace(
+            title=(
+                "HP Victus AMD Ryzen 7 Hexa Core 7445HS - "
+                "(16 GB/512 GB SSD/Windows 11 Home/6 GB Graphics/"
+                "NVIDIA GeForce RTX 4050) Gaming Laptop"
+            ),
+            position=1,
+            pk="victus",
+        )
+
+        result = rank_flipkart_search_result(amazon, candidate)
+
+        self.assertGreaterEqual(result["score"], 90)
+        self.assertEqual(result["confidence"], "high")
+
+    def test_truncated_victus_search_title_still_selects_six_gb_candidate(self):
+        amazon = SimpleNamespace(
+            product_title=(
+                "HP Victus, AMD Ryzen 7 7445HS, 6GB RTX 4050, 16GB DDR5 "
+                "512GB SSD, Win11, fb3130AX Gaming Laptop"
+            ),
+            brand="HP",
+            processor="AMD Ryzen 7 7445HS",
+            ram="16 GB",
+            storage="512 GB",
+            operating_system="Windows 11",
+        )
+        candidates = [
+            SimpleNamespace(
+                pid="FOURGB",
+                title=(
+                    "HP Victus AMD Ryzen 7 Hexa Core 7445HS - "
+                    "(16 GB/512 GB SSD/Windows 11 Home/4 GB Graphics/"
+                    "NVIDIA GeForc..."
+                ),
+                position=3,
+                pk="fourgb",
+            ),
+            SimpleNamespace(
+                pid="SIXGB",
+                title=(
+                    "HP Victus AMD Ryzen 7 Hexa Core 7445HS - "
+                    "(16 GB/512 GB SSD/Windows 11 Home/6 GB Graphics/"
+                    "NVIDIA GeForc..."
+                ),
+                position=4,
+                pk="sixgb",
+            ),
+        ]
+
+        ranked = rank_flipkart_search_results(amazon, candidates)
+
+        self.assertEqual(ranked[0]["candidate"].pid, "SIXGB")
+        self.assertGreaterEqual(ranked[0]["score"], 90)
+        self.assertEqual(ranked[0]["confidence"], "high")
+        self.assertEqual(ranked[1]["signals"]["conflicts"]["gpu_memory"], ["4gb"])
+
+    @patch("apps.importer.services.best_flipkart_match.search_and_save_flipkart_candidates")
+    @patch("apps.importer.services.flipkart_product.extract_flipkart_product")
+    def test_best_match_updates_existing_pid_and_product_match(self, extractor, search):
+        amazon = self.make_best_match_product(asin="B0BEST000002")
+        candidate = self.make_best_match_candidate(
+            amazon, "EXIST123", "Apple iPhone 16 128 GB", 1
+        )
+        existing_product = FlipkartProduct.objects.create(
+            search_result=candidate,
+            pid=candidate.pid,
+            url=candidate.product_url,
+            product_title="Old title",
+        )
+        ProductMatch.objects.create(
+            amazon_product=amazon,
+            flipkart_product=existing_product,
+            confidence="high",
+            match_status="approved",
+            score=1,
+        )
+        search.return_value = SimpleNamespace(candidate_pids=(candidate.pid,))
+        extractor.return_value = {**MOCK_FLIPKART_PRODUCT, "pid": candidate.pid}
+
+        extract_best_matched_flipkart_product(amazon)
+
+        self.assertEqual(FlipkartProduct.objects.filter(pid=candidate.pid).count(), 1)
+        existing_product.refresh_from_db()
+        self.assertEqual(existing_product.product_title, MOCK_FLIPKART_PRODUCT["product_title"])
+        match = ProductMatch.objects.get(amazon_product=amazon)
+        self.assertEqual(match.match_status, "approved")
+        self.assertGreater(match.score, 1)
+
+    @patch("apps.importer.services.best_flipkart_match.search_and_save_flipkart_candidates")
+    def test_best_match_skips_without_candidates_or_high_confidence(self, search):
+        no_candidates = self.make_best_match_product(asin="B0BEST000003")
+        search.return_value = SimpleNamespace(candidate_pids=())
+        result = extract_best_matched_flipkart_product(no_candidates)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("no Flipkart search candidates", result["reason"])
+
+        weak = self.make_best_match_product(asin="B0BEST000004")
+        weak_candidate = self.make_best_match_candidate(
+            weak, "WEAK123", "Samsung Galaxy Tablet", 1
+        )
+        search.return_value = SimpleNamespace(candidate_pids=(weak_candidate.pid,))
+        result = extract_best_matched_flipkart_product(weak)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("no sufficiently matched", result["reason"])
+        self.assertEqual(FlipkartProduct.objects.count(), 0)
+
+    def test_amazon_product_admin_best_match_action_exists(self):
+        model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
+        self.assertIn("extract_best_matched_flipkart_product", model_admin.actions)
+
+    @patch("apps.importer.admin.extract_best_matched_flipkart_product_task")
+    def test_best_match_admin_action_queues_each_product(self, task):
+        first = self.make_best_match_product(asin="B0BEST000005")
+        second = self.make_best_match_product(asin="B0BEST000006")
+        model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
+        request = self.factory.post("/admin/")
+        request.user = get_user_model().objects.create_user(username="best-match-admin")
+
+        with patch.object(model_admin, "message_user"):
+            model_admin.extract_best_matched_flipkart_product(
+                request,
+                AmazonProduct.objects.filter(pk__in=[first.pk, second.pk]).order_by("asin"),
+            )
+
+        self.assertEqual(task.delay.call_count, 2)
+        self.assertEqual(
+            {call.args[0] for call in task.delay.call_args_list},
+            {str(first.pk), str(second.pk)},
+        )
+
+    @patch("apps.importer.services.best_flipkart_match.extract_best_matched_flipkart_product")
+    def test_best_match_task_loads_product_id_and_reuses_service(self, service):
+        amazon = self.make_best_match_product(asin="B0BEST000007")
+        service.return_value = {"status": "skipped", "reason": "no match"}
+
+        result = best_match_task.run(str(amazon.pk))
+
+        self.assertEqual(result["status"], "skipped")
+        service.assert_called_once_with(AmazonProduct.objects.get(pk=amazon.pk))
+        amazon.refresh_from_db()
+        self.assertEqual(amazon.status, ImportStatus.COMPLETED)
+
+    @patch("apps.importer.services.best_flipkart_match.extract_best_matched_flipkart_product")
+    def test_best_match_task_marks_source_failed_on_service_error(self, service):
+        amazon = self.make_best_match_product(asin="B0BEST000008")
+        service.side_effect = RuntimeError("Flipkart unavailable")
+
+        with self.assertRaises(RuntimeError):
+            best_match_task.run(str(amazon.pk))
+
+        amazon.refresh_from_db()
+        self.assertEqual(amazon.status, ImportStatus.FAILED)
+        self.assertIn("Flipkart unavailable", amazon.error_message)
+
+    def test_amazon_search_result_admin_queues_all_selected_results(self):
         keyword = SearchKeyword.objects.create(keyword="laptop")
         results = []
         for index in range(20):
@@ -1006,26 +1278,17 @@ class ImporterAdminTests(TestCase):
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="amazon-admin")
 
-        with patch(
-            "apps.importer.admin.process_amazon_search_result",
-            return_value=True,
-        ) as process:
+        with patch("apps.importer.admin.amazon_product_extraction_task") as task:
             with patch.object(model_admin, "message_user"):
                 model_admin.extract_amazon_products(
                     request,
                     AmazonSearchResult.objects.filter(keyword=keyword),
                 )
 
-        self.assertEqual(process.call_count, 20)
-        self.assertEqual(
-            {call.args[0].asin for call in process.call_args_list},
-            {result.asin for result in results},
-        )
+        self.assertEqual(task.delay.call_count, 20)
+        self.assertEqual({call.args[0] for call in task.delay.call_args_list}, {str(result.pk) for result in results})
 
-    @patch("apps.importer.services.amazon_product.extract_amazon_product")
-    def test_amazon_search_result_admin_marks_successful_results_and_stays_staging(
-        self, extractor
-    ):
+    def test_amazon_search_result_admin_reports_queued(self):
         keyword = SearchKeyword.objects.create(keyword="laptop")
         result = AmazonSearchResult.objects.create(
             keyword=keyword,
@@ -1034,31 +1297,20 @@ class ImporterAdminTests(TestCase):
             product_url="https://www.amazon.in/dp/B0ADMIN00004",
             position=1,
         )
-        extractor.return_value = MOCK_PRODUCT
         model_admin = AmazonSearchResultAdmin(AmazonSearchResult, admin.site)
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="extract-admin")
 
-        with patch.object(model_admin, "message_user") as message:
-            model_admin.extract_amazon_products(
-                request,
-                AmazonSearchResult.objects.filter(pk=result.pk),
-            )
+        with patch("apps.importer.admin.amazon_product_extraction_task") as task:
+            with patch.object(model_admin, "message_user") as message:
+                model_admin.extract_amazon_products(
+                    request,
+                    AmazonSearchResult.objects.filter(pk=result.pk),
+                )
+        task.delay.assert_called_once_with(str(result.pk), job_id=ANY)
+        self.assertTrue(any("queued" in str(call).lower() for call in message.call_args_list))
 
-        result.refresh_from_db()
-        self.assertTrue(result.processed)
-        self.assertTrue(AmazonProduct.objects.filter(asin=result.asin).exists())
-        self.assertEqual(Product.objects.count(), 0)
-        self.assertEqual(ProductPrice.objects.count(), 0)
-        self.assertTrue(
-            any("Selected: 1 Successful: 1 Failed: 0 Skipped: 0" in str(call)
-                for call in message.call_args_list)
-        )
-
-    @patch("apps.importer.services.amazon_product.extract_amazon_product")
-    def test_amazon_search_result_admin_reports_failures_without_marking_processed(
-        self, extractor
-    ):
+    def test_amazon_search_result_admin_does_not_extract_in_request(self):
         keyword = SearchKeyword.objects.create(keyword="laptop")
         result = AmazonSearchResult.objects.create(
             keyword=keyword,
@@ -1067,41 +1319,35 @@ class ImporterAdminTests(TestCase):
             product_url="https://www.amazon.in/dp/B0ADMIN00005",
             position=1,
         )
-        extractor.side_effect = TimeoutError("Amazon detail timed out")
         model_admin = AmazonSearchResultAdmin(AmazonSearchResult, admin.site)
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="failure-admin")
 
-        with patch.object(model_admin, "message_user") as message:
-            model_admin.extract_amazon_products(
-                request,
-                AmazonSearchResult.objects.filter(pk=result.pk),
-            )
+        with patch("apps.importer.admin.amazon_product_extraction_task") as task:
+            with patch.object(model_admin, "message_user") as message:
+                model_admin.extract_amazon_products(
+                    request,
+                    AmazonSearchResult.objects.filter(pk=result.pk),
+                )
 
-        result.refresh_from_db()
-        product = AmazonProduct.objects.get(asin=result.asin)
-        self.assertFalse(result.processed)
-        self.assertEqual(product.status, ImportStatus.FAILED)
-        self.assertTrue(any("B0ADMIN00005" in str(call) for call in message.call_args_list))
+        task.delay.assert_called_once_with(str(result.pk), job_id=ANY)
+        self.assertTrue(any("queued" in str(call).lower() for call in message.call_args_list))
 
-    @patch("apps.importer.services.amazon_product.extract_amazon_product")
-    def test_repeating_admin_extraction_reuses_one_amazon_product(self, extractor):
+    def test_repeating_admin_extraction_queues_same_result_id(self):
         result = ImporterTests().make_search_result(asin="B0ADMIN00006")
-        extractor.return_value = MOCK_PRODUCT
         model_admin = AmazonSearchResultAdmin(AmazonSearchResult, admin.site)
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="repeat-admin")
         queryset = AmazonSearchResult.objects.filter(pk=result.pk)
 
-        with patch.object(model_admin, "message_user"):
-            model_admin.extract_amazon_products(request, queryset)
-            model_admin.extract_amazon_products(request, queryset)
+        with patch("apps.importer.admin.amazon_product_extraction_task") as task:
+            with patch.object(model_admin, "message_user"):
+                model_admin.extract_amazon_products(request, queryset)
+                model_admin.extract_amazon_products(request, queryset)
+        self.assertEqual(task.delay.call_count, 2)
+        self.assertEqual(task.delay.call_args_list[0].args, (str(result.pk),))
 
-        self.assertEqual(AmazonProduct.objects.filter(asin=result.asin).count(), 1)
-        result.refresh_from_db()
-        self.assertTrue(result.processed)
-
-    def test_amazon_admin_search_action_calls_existing_service(self):
+    def test_amazon_admin_search_action_queues_product_id(self):
         amazon = AmazonProduct.objects.create(
             asin="B0ADMIN00001",
             product_title="Apple iPhone Air",
@@ -1110,32 +1356,20 @@ class ImporterAdminTests(TestCase):
             status=ImportStatus.COMPLETED,
         )
         model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
-        summary = SimpleNamespace(
-            candidates_found=2,
-            candidates_selected=2,
-            saved=2,
-            skipped_duplicates=0,
-        )
-        with patch(
-            "apps.importer.admin.search_and_save_flipkart_candidates",
-            return_value=summary,
-        ) as search:
+        with patch("apps.importer.admin.flipkart_product_search_task") as task:
             with patch.object(model_admin, "message_user"):
                 model_admin.search_flipkart(
                     self.factory.post("/admin/"),
                     AmazonProduct.objects.filter(pk=amazon.pk),
                 )
-        search.assert_called_once_with(amazon)
+        task.delay.assert_called_once_with(str(amazon.pk), job_id=ANY)
 
     def test_amazon_product_admin_flipkart_action_exists(self):
         model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
 
         self.assertIn("search_flipkart", model_admin.actions)
 
-    @patch("apps.importer.services.flipkart_search_results.search_flipkart")
-    def test_amazon_product_admin_search_creates_linked_flipkart_candidate(
-        self, flipkart_search
-    ):
+    def test_amazon_product_admin_search_queues_without_running_browser(self):
         amazon = AmazonProduct.objects.create(
             asin="B0ADMIN00007",
             product_title="Apple iPhone Air 256 GB Light Gold",
@@ -1145,31 +1379,22 @@ class ImporterAdminTests(TestCase):
             url="https://www.amazon.in/dp/B0ADMIN00007",
             status=ImportStatus.COMPLETED,
         )
-        flipkart_search.return_value = [{
-            "pid": "MOBADMIN00007",
-            "title": "Apple iPhone Air",
-            "product_url": "https://www.flipkart.com/apple/p/itm?pid=MOBADMIN00007",
-            "position": 1,
-            "sponsored": False,
-        }]
         model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="flipkart-admin")
 
-        with patch.object(model_admin, "message_user"):
-            model_admin.search_flipkart(
-                request,
-                AmazonProduct.objects.filter(pk=amazon.pk),
-            )
-
-        candidate = FlipkartSearchResult.objects.get(pid="MOBADMIN00007")
-        self.assertEqual(candidate.amazon_product_id, amazon.pk)
-        self.assertEqual(candidate.amazon_product.asin, amazon.asin)
+        with patch("apps.importer.admin.flipkart_product_search_task") as task:
+            with patch.object(model_admin, "message_user"):
+                model_admin.search_flipkart(
+                    request,
+                    AmazonProduct.objects.filter(pk=amazon.pk),
+                )
+        task.delay.assert_called_once_with(str(amazon.pk), job_id=ANY)
+        self.assertEqual(FlipkartSearchResult.objects.count(), 0)
         self.assertEqual(Product.objects.count(), 0)
         self.assertEqual(ProductPrice.objects.count(), 0)
-        flipkart_search.assert_called()
 
-    def test_amazon_product_admin_processes_all_selected_products_and_aggregates(self):
+    def test_amazon_product_admin_queues_all_selected_products(self):
         products = []
         for index in range(22):
             products.append(
@@ -1181,37 +1406,21 @@ class ImporterAdminTests(TestCase):
                     status=ImportStatus.COMPLETED,
                 )
             )
-        summary = SimpleNamespace(
-            candidates_found=4,
-            candidates_selected=4,
-            saved=4,
-            skipped_duplicates=1,
-        )
         model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="batch-admin")
 
-        with patch(
-            "apps.importer.admin.search_and_save_flipkart_candidates",
-            return_value=summary,
-        ) as search:
+        with patch("apps.importer.admin.flipkart_product_search_task") as task:
             with patch.object(model_admin, "message_user") as message:
                 model_admin.search_flipkart(
                     request,
                     AmazonProduct.objects.filter(pk__in=[p.pk for p in products]),
                 )
 
-        self.assertEqual(search.call_count, 22)
-        self.assertTrue(
-            any(
-                "Amazon products processed: 22" in str(call)
-                and "Candidates found: 88" in str(call)
-                and "Duplicates skipped: 22" in str(call)
-                for call in message.call_args_list
-            )
-        )
+        self.assertEqual(task.delay.call_count, 22)
+        self.assertTrue(any("queued" in str(call).lower() for call in message.call_args_list))
 
-    def test_one_flipkart_search_failure_does_not_stop_batch(self):
+    def test_flipkart_search_queue_failure_does_not_stop_batch(self):
         first = AmazonProduct.objects.create(
             asin="B0BATCHFAIL1",
             product_title="Laptop 1",
@@ -1224,29 +1433,21 @@ class ImporterAdminTests(TestCase):
             url="https://www.amazon.in/dp/B0BATCHFAIL2",
             status=ImportStatus.COMPLETED,
         )
-        summary = SimpleNamespace(
-            candidates_found=1,
-            candidates_selected=1,
-            saved=1,
-            skipped_duplicates=0,
-        )
         model_admin = AmazonProductAdmin(AmazonProduct, admin.site)
         request = self.factory.post("/admin/")
         request.user = get_user_model().objects.create_user(username="failure-batch-admin")
 
-        with patch(
-            "apps.importer.admin.search_and_save_flipkart_candidates",
-            side_effect=[RuntimeError("Flipkart timeout"), summary],
-        ) as search:
+        with patch("apps.importer.admin.flipkart_product_search_task") as task:
+            task.delay.side_effect = [RuntimeError("queue unavailable"), None]
             with patch.object(model_admin, "message_user") as message:
                 model_admin.search_flipkart(
                     request,
                     AmazonProduct.objects.filter(pk__in=[first.pk, second.pk]).order_by("asin"),
                 )
 
-        self.assertEqual(search.call_count, 2)
+        self.assertEqual(task.delay.call_count, 2)
         self.assertTrue(any("B0BATCHFAIL1" in str(call) for call in message.call_args_list))
-        self.assertTrue(any("Successful: 1 Failed: 1" in str(call) for call in message.call_args_list))
+        self.assertTrue(any("queue" in str(call).lower() for call in message.call_args_list))
 
     def test_flipkart_result_admin_extraction_action_calls_existing_service(self):
         amazon = AmazonProduct.objects.create(
@@ -1263,17 +1464,13 @@ class ImporterAdminTests(TestCase):
             position=1,
         )
         model_admin = FlipkartSearchResultAdmin(FlipkartSearchResult, admin.site)
-        with patch(
-            "apps.importer.admin.process_flipkart_search_result",
-            return_value=True,
-        ) as extract:
+        with patch("apps.importer.admin.flipkart_product_extraction_task") as task:
             with patch.object(model_admin, "message_user"):
                 model_admin.extract_flipkart_products(
                     self.factory.post("/admin/"),
                     FlipkartSearchResult.objects.filter(pk=result.pk),
                 )
-        extract.assert_called_once()
-        self.assertEqual(extract.call_args.args[0].pk, result.pk)
+        task.delay.assert_called_once_with(str(result.pk), job_id=ANY)
 
     def test_matching_admin_action_uses_service_and_updates_existing_match(self):
         amazon, flipkart = ImporterTests().make_matching_pair()
@@ -1319,15 +1516,13 @@ class ImporterAdminTests(TestCase):
             position=1,
         )
         model_admin = FlipkartSearchResultAdmin(FlipkartSearchResult, admin.site)
-        with patch(
-            "apps.importer.admin.process_flipkart_search_result",
-            side_effect=RuntimeError("scraper unavailable"),
-        ):
+        with patch("apps.importer.admin.flipkart_product_extraction_task") as task:
             with patch.object(model_admin, "message_user") as message:
                 model_admin.extract_flipkart_products(
                     self.factory.post("/admin/"),
                     FlipkartSearchResult.objects.filter(pk=result.pk),
                 )
+        task.delay.assert_called_once_with(str(result.pk), job_id=ANY)
         self.assertTrue(message.called)
 
 
@@ -1719,7 +1914,7 @@ class KeywordProductMatchingAdminTests(TestCase):
         self.assertIn("run_product_matching", model_admin.actions)
         self.assertIn("run_flipkart_search", model_admin.actions)
 
-    def test_search_keyword_admin_flipkart_action_uses_existing_service_only(self):
+    def test_search_keyword_admin_flipkart_action_queues_task_only(self):
         keyword, amazon, _ = self.make_pair(
             "laptop", "B0LAPTOP0003", "MOBLAPTOP003", "Dell Laptop 256 GB"
         )
@@ -1727,30 +1922,19 @@ class KeywordProductMatchingAdminTests(TestCase):
         request = self.factory.post("/admin/")
         request.user = self.user
 
-        summary = SimpleNamespace(
-            amazon_products_total=1,
-            successful=1,
-            failed=0,
-            skipped=0,
-            candidates_found=6,
-            saved=4,
-            skipped_duplicates=2,
-            failed_products=(),
-        )
-
-        with patch("apps.importer.admin.run_flipkart_search_for_keyword", return_value=summary) as flipkart_search:
-            with patch("apps.importer.admin.run_amazon_search_for_keyword") as amazon_search:
+        with patch("apps.importer.admin.flipkart_search_task") as flipkart_search:
+            with patch("apps.importer.admin.run_flipkart_search_for_keyword") as sync_search:
                 with patch.object(model_admin, "message_user") as message:
                     model_admin.run_flipkart_search(
                         request,
                         SearchKeyword.objects.filter(pk=keyword.pk),
                     )
 
-        flipkart_search.assert_called_once_with(keyword)
-        amazon_search.assert_not_called()
+        flipkart_search.delay.assert_called_once_with(str(keyword.pk), job_id=ANY)
+        sync_search.assert_not_called()
         self.assertEqual(Product.objects.count(), 0)
         self.assertEqual(ProductPrice.objects.count(), 0)
-        self.assertTrue(any("Flipkart search completed." in str(call) for call in message.call_args_list))
+        self.assertTrue(any("queued" in str(call).lower() for call in message.call_args_list))
 
     def test_search_keyword_admin_flipkart_action_processes_multiple_keywords(self):
         laptop_keyword, _, _ = self.make_pair(
@@ -1763,25 +1947,14 @@ class KeywordProductMatchingAdminTests(TestCase):
         request = self.factory.post("/admin/")
         request.user = self.user
 
-        summary = SimpleNamespace(
-            amazon_products_total=1,
-            successful=1,
-            failed=0,
-            skipped=0,
-            candidates_found=3,
-            saved=2,
-            skipped_duplicates=1,
-            failed_products=(),
-        )
-
-        with patch("apps.importer.admin.run_flipkart_search_for_keyword", return_value=summary) as flipkart_search:
+        with patch("apps.importer.admin.flipkart_search_task") as flipkart_search:
             with patch.object(model_admin, "message_user"):
                 model_admin.run_flipkart_search(
                     request,
                     SearchKeyword.objects.filter(pk__in=[laptop_keyword.pk, phone_keyword.pk]),
                 )
 
-        self.assertEqual(flipkart_search.call_count, 2)
+        self.assertEqual(flipkart_search.delay.call_count, 2)
 
     def test_search_keyword_admin_total_flipkart_results_uses_persisted_records(self):
         keyword, amazon, _ = self.make_pair(

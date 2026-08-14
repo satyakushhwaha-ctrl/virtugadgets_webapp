@@ -36,6 +36,7 @@ class FlipkartSearchSummary:
     saved: int
     skipped_duplicates: int
     attempts: tuple[FlipkartSearchAttempt, ...] = ()
+    candidate_pids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,14 +53,15 @@ class KeywordFlipkartSearchSummary:
 
 def search_and_save_flipkart_candidates(
     amazon_product: AmazonProduct,
-    candidate_limit: int = MAX_CANDIDATES_PER_PRODUCT,
+    candidate_limit: int | None = MAX_CANDIDATES_PER_PRODUCT,
+    require_completed: bool = True,
 ) -> FlipkartSearchSummary:
     """Search Flipkart and persist at most the safe candidate maximum."""
-    if amazon_product.status != ImportStatus.COMPLETED:
+    if require_completed and amazon_product.status != ImportStatus.COMPLETED:
         raise ValueError(
             f"AmazonProduct {amazon_product.asin} is not completed."
         )
-    if candidate_limit <= 0:
+    if candidate_limit is not None and candidate_limit <= 0:
         raise ValueError("Candidate limit must be positive.")
 
     attempts = []
@@ -122,7 +124,7 @@ def _save_flipkart_candidates(
     search_keyword: SearchKeyword | None = None,
     candidates: list[dict],
     selected_query: str,
-    candidate_limit: int = MAX_CANDIDATES_PER_PRODUCT,
+    candidate_limit: int | None = MAX_CANDIDATES_PER_PRODUCT,
     attempts: tuple[FlipkartSearchAttempt, ...] = (),
 ) -> FlipkartSearchSummary:
     if not amazon_product and not search_keyword:
@@ -130,7 +132,11 @@ def _save_flipkart_candidates(
     if amazon_product and search_keyword:
         raise ValueError("Provide either amazon_product or search_keyword, not both.")
 
-    candidates_to_save = candidates[:min(candidate_limit, MAX_CANDIDATES_PER_PRODUCT)]
+    candidates_to_save = (
+        candidates
+        if candidate_limit is None
+        else candidates[:min(candidate_limit, MAX_CANDIDATES_PER_PRODUCT)]
+    )
     saved = 0
     skipped_duplicates = 0
 
@@ -177,6 +183,7 @@ def _save_flipkart_candidates(
         saved=saved,
         skipped_duplicates=skipped_duplicates,
         attempts=attempts,
+        candidate_pids=tuple(candidate["pid"] for candidate in candidates_to_save),
     )
 
 

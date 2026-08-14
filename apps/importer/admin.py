@@ -17,17 +17,12 @@ from .models import (
     FlipkartProduct,
     FlipkartSearchResult,
     ImportBatch,
+    ImporterJob,
+    ImporterJobMarketplace,
+    ImporterJobType,
     ProductMatch,
     SearchKeyword,
     ImportStatus,
-)
-from .services.amazon_search_results import run_amazon_search_for_keyword
-from .services.amazon_product import process_amazon_search_result
-from .services.flipkart_product import process_flipkart_search_result
-from .services.flipkart_search_results import (
-    run_flipkart_search_for_keyword,
-    search_and_save_flipkart_candidates_for_amazon_product,
-    search_and_save_flipkart_candidates,
 )
 from .services.product_matching import (
     extract_model_identity,
@@ -35,6 +30,20 @@ from .services.product_matching import (
     match_products,
 )
 from .services.product_matching import run_product_matching_for_keyword
+from apps.core.tasks import (
+    amazon_product_extraction_task,
+    amazon_search_task,
+    extract_best_matched_flipkart_product as extract_best_matched_flipkart_product_task,
+    flipkart_product_extraction_task,
+    flipkart_product_search_task,
+    flipkart_search_task,
+)
+# Kept as module-level compatibility names for integrations that patch the
+# service layer in tests; admin requests call Celery task queues above.
+from .services.amazon_product import process_amazon_search_result
+from .services.flipkart_product import process_flipkart_search_result
+from .services.flipkart_search_results import search_and_save_flipkart_candidates
+from .services.flipkart_search_results import run_flipkart_search_for_keyword
 from .services.product_publisher import (
     PublishValidationError,
     approve_amazon_product,
@@ -49,6 +58,21 @@ from .services.product_publisher import (
     assign_staged_product_categories,
 )
 from .services.batch_runner import cancel_batch, publish_approved_products, run_batch
+from .services.jobs import create_job, enqueue_job
+
+
+def _queue_import_job(request, task, *, title, job_type, marketplace="", args=(),
+                      total_items=1, amazon_product=None, flipkart_product=None):
+    job = create_job(
+        title=title,
+        job_type=job_type,
+        marketplace=marketplace,
+        total_items=total_items,
+        created_by=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
+        amazon_product=amazon_product,
+        flipkart_product=flipkart_product,
+    )
+    return enqueue_job(task=task, job=job, args=args)
 
 
 class FlipkartSearchResultInline(admin.TabularInline):
@@ -387,6 +411,50 @@ class ImportBatchAdmin(admin.ModelAdmin):
         )
 
 
+@admin.register(ImporterJob)
+class ImporterJobAdmin(admin.ModelAdmin):
+    list_display = (
+        "title", "job_type", "status", "marketplace", "progress",
+        "success_count", "failed_count", "skipped_count", "created_at",
+        "started_at", "completed_at",
+    )
+    list_filter = ("status", "job_type", "marketplace", "created_at", "created_by")
+    search_fields = ("title", "celery_task_id", "error_message", "result_message")
+    ordering = ("-created_at",)
+    list_select_related = ("created_by", "amazon_product", "flipkart_product", "import_batch", "product_match")
+    readonly_fields = (
+        "status", "celery_task_id", "created_at", "queued_at", "started_at",
+        "completed_at", "updated_at", "progress", "related_objects",
+        "total_items", "processed_items", "success_count", "failed_count",
+        "skipped_count", "retry_count", "error_message", "result_message",
+    )
+    fieldsets = (
+        ("Job", {"fields": ("title", "job_type", "status", "marketplace", "celery_task_id", "created_by")}),
+        ("Progress", {"fields": ("progress", "total_items", "processed_items", "success_count", "failed_count", "skipped_count", "retry_count")}),
+        ("Related objects", {"fields": ("related_objects", "import_batch", "amazon_product", "flipkart_product", "product_match")}),
+        ("Result", {"fields": ("error_message", "result_message", "metadata")}),
+        ("Timestamps", {"fields": ("created_at", "queued_at", "started_at", "completed_at", "updated_at")}),
+    )
+
+    @admin.display(description="Progress")
+    def progress(self, obj):
+        return obj.progress_display
+
+    @admin.display(description="Related objects")
+    def related_objects(self, obj):
+        links = []
+        for value, label, model_name in (
+            (obj.amazon_product, "AmazonProduct", "amazonproduct"),
+            (obj.flipkart_product, "FlipkartProduct", "flipkartproduct"),
+            (obj.import_batch, "ImportBatch", "importbatch"),
+            (obj.product_match, "ProductMatch", "productmatch"),
+        ):
+            if value:
+                url = reverse(f"admin:importer_{model_name}_change", args=[value.pk])
+                links.append(format_html('<a href="{}">{}</a>', url, label))
+        return format_html("<br>".join(str(link) for link in links)) if links else "—"
+
+
 @admin.register(SearchKeyword)
 class SearchKeywordAdmin(admin.ModelAdmin):
     list_display = (
@@ -495,10 +563,16 @@ class SearchKeywordAdmin(admin.ModelAdmin):
 
     @admin.action(description="Run Amazon Search")
     def run_amazon_search(self, request, queryset):
-        completed = failed = 0
-        for search_keyword in queryset:
+        queued = failed = 0
+        for search_keyword in queryset.iterator():
             try:
-                summary = run_amazon_search_for_keyword(search_keyword)
+                _queue_import_job(
+                    request, amazon_search_task,
+                    title=f"Amazon Search — {search_keyword.keyword}",
+                    job_type=ImporterJobType.AMAZON_SEARCH,
+                    marketplace=ImporterJobMarketplace.AMAZON,
+                    args=(str(search_keyword.pk),),
+                )
             except Exception as exc:
                 failed += 1
                 self.message_user(
@@ -506,72 +580,26 @@ class SearchKeywordAdmin(admin.ModelAdmin):
                     level=messages.ERROR,
                 )
                 continue
-            completed += 1
-            self.message_user(
-                request,
-                f"{search_keyword.keyword}: found {summary.results_found}, "
-                f"saved {summary.saved}, skipped {summary.skipped_duplicates} duplicates.",
-            )
-        if failed:
-            self.message_user(
-                request,
-                f"Amazon search completed for {completed}; failed for {failed}.",
-                level=messages.ERROR,
-            )
+            queued += 1
+        self.message_user(request, f"Amazon search queued for {queued} keyword(s); queue failures: {failed}.", level=messages.ERROR if failed else messages.SUCCESS)
 
     @admin.action(description="Run Flipkart Search")
     def run_flipkart_search(self, request, queryset):
-        processed_keywords = successful_keywords = failed_keywords = skipped_keywords = 0
-        candidates_found = saved = skipped_duplicates = 0
-        failures = []
-
+        queued = failed = 0
         for search_keyword in queryset.iterator():
-            processed_keywords += 1
             try:
-                summary = run_flipkart_search_for_keyword(search_keyword)
-            except Exception as exc:
-                failed_keywords += 1
-                failures.append(f"{search_keyword.keyword} ({exc})")
-                continue
-
-            if summary.failed:
-                failed_keywords += 1
-                failures.extend(
-                    f"{search_keyword.keyword} / {failure}"
-                    for failure in summary.failed_products
+                _queue_import_job(
+                    request, flipkart_search_task,
+                    title=f"Flipkart Search — {search_keyword.keyword}",
+                    job_type=ImporterJobType.FLIPKART_SEARCH,
+                    marketplace=ImporterJobMarketplace.FLIPKART,
+                    args=(str(search_keyword.pk),),
                 )
-            else:
-                successful_keywords += 1
-
-            candidates_found += summary.candidates_found
-            saved += summary.saved
-            skipped_duplicates += summary.skipped_duplicates
-            self.message_user(
-                request,
-                f"{search_keyword.keyword}: processed {summary.amazon_products_total} Flipkart keyword search, "
-                f"found {summary.candidates_found} Flipkart candidates, "
-                f"saved {summary.saved}, skipped {summary.skipped_duplicates} duplicates.",
-                level=messages.ERROR if summary.failed else messages.SUCCESS,
-            )
-
-        if failures:
-            self.message_user(
-                request,
-                "Flipkart search failures: " + "; ".join(failures),
-                level=messages.ERROR,
-            )
-        self.message_user(
-            request,
-            "Flipkart search completed. "
-            f"Keywords processed: {processed_keywords} "
-            f"Successful: {successful_keywords} "
-            f"Failed: {failed_keywords} "
-            f"Skipped: {skipped_keywords} "
-            f"Candidates found: {candidates_found} "
-            f"Saved: {saved} "
-            f"Duplicates skipped: {skipped_duplicates}.",
-            level=messages.ERROR if failed_keywords else messages.SUCCESS,
-        )
+                queued += 1
+            except Exception as exc:
+                failed += 1
+                self.message_user(request, f"{search_keyword.keyword}: Flipkart search queue failed: {exc}", level=messages.ERROR)
+        self.message_user(request, f"Flipkart search queued for {queued} keyword(s); queue failures: {failed}.", level=messages.ERROR if failed else messages.SUCCESS)
 
 
 @admin.register(AmazonSearchResult)
@@ -584,36 +612,21 @@ class AmazonSearchResultAdmin(admin.ModelAdmin):
 
     @admin.action(description="Extract selected Amazon products")
     def extract_amazon_products(self, request, queryset):
-        """Extract every selected result through the existing staging service."""
-        selected = queryset.count()
-        successful = failed = skipped = 0
-        failed_asins = []
-
-        for search_result in queryset.select_related("keyword").iterator():
+        queued = failed = 0
+        for search_result in queryset.iterator():
             try:
-                processed = process_amazon_search_result(search_result)
+                _queue_import_job(
+                    request, amazon_product_extraction_task,
+                    title=f"Amazon Product Extraction — {search_result.asin}",
+                    job_type=ImporterJobType.AMAZON_PRODUCT_EXTRACTION,
+                    marketplace=ImporterJobMarketplace.AMAZON,
+                    args=(str(search_result.pk),),
+                )
+                queued += 1
             except Exception as exc:
                 failed += 1
-                failed_asins.append(f"{search_result.asin} ({exc})")
-                continue
-
-            if processed:
-                successful += 1
-            else:
-                skipped += 1
-
-        if failed_asins:
-            self.message_user(
-                request,
-                "Amazon extraction failures: " + "; ".join(failed_asins),
-                level=messages.ERROR,
-            )
-        self.message_user(
-            request,
-            f"Amazon extraction completed. Selected: {selected} "
-            f"Successful: {successful} Failed: {failed} Skipped: {skipped}.",
-            level=messages.ERROR if failed else messages.SUCCESS,
-        )
+                self.message_user(request, f"{search_result.asin}: Amazon extraction queue failed: {exc}", level=messages.ERROR)
+        self.message_user(request, f"Amazon extraction queued for {queued} result(s); queue failures: {failed}.", level=messages.ERROR if failed else messages.SUCCESS)
 
 
 @admin.register(FlipkartSearchResult)
@@ -626,28 +639,21 @@ class FlipkartSearchResultAdmin(admin.ModelAdmin):
 
     @admin.action(description="Extract Flipkart Products")
     def extract_flipkart_products(self, request, queryset):
-        successful = failed = skipped = 0
-        for search_result in queryset.select_related("amazon_product", "search_keyword"):
+        queued = failed = 0
+        for search_result in queryset.iterator():
             try:
-                processed = process_flipkart_search_result(search_result)
+                _queue_import_job(
+                    request, flipkart_product_extraction_task,
+                    title=f"Flipkart Product Extraction — PID {search_result.pid}",
+                    job_type=ImporterJobType.FLIPKART_PRODUCT_EXTRACTION,
+                    marketplace=ImporterJobMarketplace.FLIPKART,
+                    args=(str(search_result.pk),),
+                )
+                queued += 1
             except Exception as exc:
                 failed += 1
-                self.message_user(
-                    request,
-                    f"{search_result.pid}: Flipkart extraction failed: {exc}",
-                    level=messages.ERROR,
-                )
-                continue
-            if processed:
-                successful += 1
-            else:
-                skipped += 1
-        self.message_user(
-            request,
-            f"Flipkart extraction completed. Selected: {queryset.count()} "
-            f"Successful: {successful} Failed: {failed} Skipped: {skipped}.",
-            level=messages.ERROR if failed else messages.SUCCESS,
-        )
+                self.message_user(request, f"{search_result.pid}: Flipkart extraction queue failed: {exc}", level=messages.ERROR)
+        self.message_user(request, f"Flipkart extraction queued for {queued} result(s); queue failures: {failed}.", level=messages.ERROR if failed else messages.SUCCESS)
 
 
 class FlipkartProductAdminForm(forms.ModelForm):
@@ -831,19 +837,25 @@ class FlipkartProductAdmin(admin.ModelAdmin):
 
     @admin.action(description="Search Amazon for selected Flipkart products")
     def search_amazon(self, request, queryset):
-        searched = failed = 0
+        queued = failed = 0
         for product in queryset:
             keyword_text = (product.product_title or product.brand or product.pid).strip()
             try:
                 keyword, _ = SearchKeyword.objects.get_or_create(keyword=keyword_text)
-                run_amazon_search_for_keyword(keyword)
-                searched += 1
+                _queue_import_job(
+                    request, amazon_search_task,
+                    title=f"Amazon Search — {keyword.keyword}",
+                    job_type=ImporterJobType.AMAZON_SEARCH,
+                    marketplace=ImporterJobMarketplace.AMAZON,
+                    args=(str(keyword.pk),),
+                )
+                queued += 1
             except Exception as exc:
                 failed += 1
-                self.message_user(request, f"{product.pid}: Amazon search failed: {exc}", level=messages.ERROR)
+                self.message_user(request, f"{product.pid}: Amazon search queue failed: {exc}", level=messages.ERROR)
         self.message_user(
             request,
-            f"Amazon search completed for {searched} Flipkart product(s); failures: {failed}.",
+            f"Amazon search queued for {queued} Flipkart product(s); queue failures: {failed}.",
             level=messages.ERROR if failed else messages.SUCCESS,
         )
 
@@ -881,6 +893,7 @@ class AmazonProductAdmin(admin.ModelAdmin):
         "unpublish_selected",
         "assign_categories",
         "search_flipkart",
+        "extract_best_matched_flipkart_product",
     )
     inlines = (FlipkartSearchResultInline, ProductMatchInline)
     list_select_related = ("published_product",)
@@ -1052,54 +1065,77 @@ class AmazonProductAdmin(admin.ModelAdmin):
             self.message_user(request, "Amazon product unpublished.")
         elif "_search_flipkart_keyword" in request.POST:
             try:
-                summary = search_and_save_flipkart_candidates_for_amazon_product(
-                    obj,
-                    request.POST.get("flipkart_keyword", ""),
+                _queue_import_job(
+                    request, flipkart_product_search_task,
+                    title=f"Flipkart Search — {obj.asin}",
+                    job_type=ImporterJobType.FLIPKART_SEARCH,
+                    marketplace=ImporterJobMarketplace.FLIPKART,
+                    args=(str(obj.pk), request.POST.get("flipkart_keyword", "")),
+                    amazon_product=obj,
                 )
-                self.message_user(
-                    request,
-                    f"Flipkart search complete. Found {summary.candidates_found} result(s); "
-                    f"saved {summary.saved}, skipped {summary.skipped_duplicates} duplicate(s).",
-                    level=messages.SUCCESS,
-                )
+                self.message_user(request, "Flipkart search queued.", level=messages.SUCCESS)
             except Exception as exc:
-                self.message_user(request, f"Flipkart search failed: {exc}", level=messages.ERROR)
+                self.message_user(request, f"Flipkart search queue failed: {exc}", level=messages.ERROR)
         return super().response_change(request, obj)
 
     @admin.action(description="Search Flipkart for selected products")
     def search_flipkart(self, request, queryset):
-        selected = queryset.count()
-        successful = failed = skipped = 0
-        candidates_found = duplicates_skipped = 0
-        failed_asins = []
+        queued = failed = 0
         for amazon_product in queryset.iterator():
-            if amazon_product.status != "completed":
-                skipped += 1
-                continue
             try:
-                summary = search_and_save_flipkart_candidates(amazon_product)
+                _queue_import_job(
+                    request, flipkart_product_search_task,
+                    title=f"Flipkart Search — {amazon_product.product_title or amazon_product.asin}",
+                    job_type=ImporterJobType.FLIPKART_SEARCH,
+                    marketplace=ImporterJobMarketplace.FLIPKART,
+                    args=(str(amazon_product.pk),),
+                    amazon_product=amazon_product,
+                )
+                queued += 1
             except Exception as exc:
                 failed += 1
-                failed_asins.append(f"{amazon_product.asin} ({exc})")
-                continue
-            successful += 1
-            candidates_found += summary.candidates_found
-            duplicates_skipped += summary.skipped_duplicates
-        if failed_asins:
-            self.message_user(
-                request,
-                "Flipkart search failures: " + "; ".join(failed_asins),
-                level=messages.ERROR,
-            )
+                self.message_user(request, f"{amazon_product.asin}: Flipkart search queue failed: {exc}", level=messages.ERROR)
         self.message_user(
             request,
-            "Flipkart search completed. "
-            f"Amazon products processed: {selected} "
-            f"Successful: {successful} Failed: {failed} Skipped: {skipped} "
-            f"Candidates found: {candidates_found} "
-            f"Duplicates skipped: {duplicates_skipped}.",
+            f"Flipkart search queued for {queued} Amazon product(s); queue failures: {failed}.",
             level=messages.ERROR if failed else messages.SUCCESS,
         )
+
+    @admin.action(description="Extract Best-Matched Flipkart Product")
+    def extract_best_matched_flipkart_product(self, request, queryset):
+        queued = failed = 0
+        for amazon_product in queryset.iterator():
+            try:
+                _queue_import_job(
+                    request, extract_best_matched_flipkart_product_task,
+                    title=f"Best Match Flipkart — {amazon_product.asin}",
+                    job_type=ImporterJobType.BEST_MATCH_FLIPKART,
+                    marketplace=ImporterJobMarketplace.FLIPKART,
+                    args=(str(amazon_product.pk),),
+                    amazon_product=amazon_product,
+                )
+            except Exception as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"{amazon_product.asin}: could not queue best-match extraction: {exc}",
+                    level=messages.ERROR,
+                )
+                continue
+            queued += 1
+
+        if queued:
+            self.message_user(
+                request,
+                f"Queued best-match extraction for {queued} Amazon product(s).",
+                level=messages.SUCCESS,
+            )
+        if failed:
+            self.message_user(
+                request,
+                f"Could not queue best-match extraction for {failed} Amazon product(s).",
+                level=messages.ERROR,
+            )
 
     @admin.display(description="Search keyword")
     def search_keyword(self, obj):

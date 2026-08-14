@@ -34,6 +34,34 @@ class BatchStatus(models.TextChoices):
     CANCELLED = "cancelled", "Cancelled"
 
 
+class ImporterJobStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    QUEUED = "queued", "Queued"
+    RUNNING = "running", "Running"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+    PARTIAL = "partial", "Partial"
+    SKIPPED = "skipped", "Skipped"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class ImporterJobType(models.TextChoices):
+    AMAZON_SEARCH = "amazon_search", "Amazon Search"
+    AMAZON_PRODUCT_EXTRACTION = "amazon_product_extraction", "Amazon Product Extraction"
+    FLIPKART_SEARCH = "flipkart_search", "Flipkart Search"
+    FLIPKART_PRODUCT_EXTRACTION = "flipkart_product_extraction", "Flipkart Product Extraction"
+    BEST_MATCH_FLIPKART = "best_match_flipkart", "Best-Matched Flipkart"
+    PRODUCT_MATCHING = "product_matching", "Product Matching"
+    PRODUCT_PUBLISHING = "product_publishing", "Product Publishing"
+
+
+class ImporterJobMarketplace(models.TextChoices):
+    AMAZON = "amazon", "Amazon"
+    FLIPKART = "flipkart", "Flipkart"
+    BOTH = "both", "Amazon + Flipkart"
+    INTERNAL = "internal", "Internal"
+
+
 class MatchStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     MATCHED = "matched", "Matched"
@@ -111,6 +139,96 @@ class ImportBatch(models.Model):
 
     def __str__(self):
         return f"{self.keyword.keyword} · {self.pk}"
+
+
+class ImporterJob(models.Model):
+    """Persistent lifecycle and progress record for a Celery import job."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    job_type = models.CharField(max_length=40, choices=ImporterJobType.choices, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=ImporterJobStatus.choices,
+        default=ImporterJobStatus.PENDING,
+        db_index=True,
+    )
+    celery_task_id = models.CharField(max_length=255, blank=True, db_index=True)
+    marketplace = models.CharField(
+        max_length=20,
+        choices=ImporterJobMarketplace.choices,
+        blank=True,
+        db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="importer_jobs",
+    )
+    import_batch = models.ForeignKey(
+        "ImportBatch",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="importer_jobs",
+    )
+    amazon_product = models.ForeignKey(
+        "AmazonProduct",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="importer_jobs",
+    )
+    flipkart_product = models.ForeignKey(
+        "FlipkartProduct",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="importer_jobs",
+    )
+    product_match = models.ForeignKey(
+        "ProductMatch",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="importer_jobs",
+    )
+    total_items = models.PositiveIntegerField(default=0)
+    processed_items = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    retry_count = models.PositiveIntegerField(default=0)
+    error_message = models.TextField(blank=True)
+    result_message = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    queued_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["-created_at", "status"]),
+            models.Index(fields=["job_type", "status"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+    @property
+    def progress_percent(self):
+        if not self.total_items:
+            return 0
+        return min(100, round(self.processed_items * 100 / self.total_items))
+
+    @property
+    def progress_display(self):
+        return f"{self.processed_items} / {self.total_items} ({self.progress_percent}%)"
 
 
 class AmazonSearchResult(models.Model):
