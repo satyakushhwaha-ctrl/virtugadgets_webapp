@@ -10,6 +10,7 @@ distro==1.9.0
 Django==5.2
 django-environ==0.14.0
 django-extensions==4.1
+django-jazzmin==3.0.1
 google-auth==2.56.3
 google-genai==2.17.0
 greenlet==3.5.4

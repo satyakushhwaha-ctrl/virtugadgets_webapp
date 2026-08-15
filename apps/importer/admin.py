@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 from django import forms
 from django.db import models
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.template.response import TemplateResponse
@@ -59,6 +59,21 @@ from .services.product_publisher import (
 )
 from .services.batch_runner import cancel_batch, publish_approved_products, run_batch
 from .services.jobs import create_job, enqueue_job
+
+
+def _status_badge(value, *, label=None):
+    value = str(value or "unknown")
+    css_value = value.lower().replace(" ", "-")
+    return format_html(
+        '<span class="vg-admin-status vg-admin-status-{}">{}</span>',
+        css_value,
+        label or value.replace("_", " ").title(),
+    )
+
+
+def _compact_title(value, limit=64):
+    value = " ".join(str(value or "").split())
+    return value if len(value) <= limit else f"{value[:limit - 1]}…"
 
 
 def _queue_import_job(request, task, *, title, job_type, marketplace="", args=(),
@@ -414,9 +429,9 @@ class ImportBatchAdmin(admin.ModelAdmin):
 @admin.register(ImporterJob)
 class ImporterJobAdmin(admin.ModelAdmin):
     list_display = (
-        "title", "job_type", "status", "marketplace", "progress",
+        "title", "job_type", "status_badge", "marketplace", "progress",
         "success_count", "failed_count", "skipped_count", "created_at",
-        "started_at", "completed_at",
+        "duration", "completed_at",
     )
     list_filter = ("status", "job_type", "marketplace", "created_at", "created_by")
     search_fields = ("title", "celery_task_id", "error_message", "result_message")
@@ -439,6 +454,19 @@ class ImporterJobAdmin(admin.ModelAdmin):
     @admin.display(description="Progress")
     def progress(self, obj):
         return obj.progress_display
+
+    @admin.display(description="Status", ordering="status")
+    def status_badge(self, obj):
+        return _status_badge(obj.get_status_display(), label=obj.get_status_display())
+
+    @admin.display(description="Duration")
+    def duration(self, obj):
+        if not obj.started_at:
+            return "—"
+        end = obj.completed_at or timezone.now()
+        seconds = max(0, int((end - obj.started_at).total_seconds()))
+        minutes, remainder = divmod(seconds, 60)
+        return f"{minutes}m {remainder}s" if minutes else f"{remainder}s"
 
     @admin.display(description="Related objects")
     def related_objects(self, obj):
@@ -672,9 +700,9 @@ class FlipkartProductAdminForm(forms.ModelForm):
 class FlipkartProductAdmin(admin.ModelAdmin):
     form = FlipkartProductAdminForm
     list_display = (
-        "image_preview", "pid", "product_title", "brand", "categories_display", "current_selling_price_inr",
-        "availability", "status", "approval_status", "publication_status",
-        "published_product", "amazon_offer_status", "extracted_at",
+        "image_preview", "product_summary", "pid", "brand", "categories_display",
+        "current_selling_price_inr", "availability", "status_badge",
+        "amazon_offer_status", "updated_at",
     )
     search_fields = (
         "pid", "product_title", "brand", "search_result__pid",
@@ -702,7 +730,9 @@ class FlipkartProductAdmin(admin.ModelAdmin):
     )
 
     def get_queryset(self, request):
-        return super().get_queryset(request).prefetch_related("categories")
+        return super().get_queryset(request).select_related(
+            "search_result__amazon_product", "published_product"
+        ).prefetch_related("categories")
 
     @admin.display(description="Source search result")
     def source_search_result(self, obj):
@@ -721,6 +751,14 @@ class FlipkartProductAdmin(admin.ModelAdmin):
             image_url,
             obj.product_title or obj.pid,
         )
+
+    @admin.display(description="Product")
+    def product_summary(self, obj):
+        return format_html("<strong>{}</strong><br><small>{}</small>", _compact_title(obj.product_title), obj.brand or "Brand not set")
+
+    @admin.display(description="Status", ordering="status")
+    def status_badge(self, obj):
+        return _status_badge(obj.get_status_display(), label=obj.get_status_display())
 
     def save_model(self, request, obj, form, change):
         previous = (
@@ -866,22 +904,15 @@ class AmazonProductAdmin(admin.ModelAdmin):
     change_form_template = "admin/importer/amazonproduct/change_form.html"
     list_display = (
         "image_preview",
+        "product_summary",
         "asin",
-        "product_title",
-        "brand",
-        "search_keyword",
-        "extraction_status",
-        "approval_status_display",
-        "publication_status",
         "categories_display",
         "current_selling_price_inr",
         "mrp_inr",
         "availability",
+        "match_status",
+        "extraction_status_badge",
         "flipkart_offer_status",
-        "image_available",
-        "created_at",
-        "flipkart_search_status",
-        "flipkart_candidates",
         "updated_at",
     )
     search_fields = ("asin", "product_title", "brand", "url")
@@ -903,6 +934,15 @@ class AmazonProductAdmin(admin.ModelAdmin):
         "publication_status", "created_at", "updated_at", "extracted_at",
         "approved_at", "approved_by", "published", "published_at", "published_product_link",
     )
+
+    def get_queryset(self, request):
+        matches = ProductMatch.objects.order_by("-updated_at")
+        return super().get_queryset(request).select_related(
+            "published_product"
+        ).prefetch_related(
+            "categories",
+            Prefetch("product_matches", queryset=matches, to_attr="dashboard_matches"),
+        )
     fieldsets = (
         (None, {"fields": ("id", "asin", "product_title", "brand", "url", "availability", "images", "image_preview")}),
         ("Pricing", {"fields": ("mrp_inr", "current_selling_price_inr", "selling_price_min_inr", "selling_price_max_inr", "discount_percentage")}),
@@ -917,6 +957,22 @@ class AmazonProductAdmin(admin.ModelAdmin):
         if not image_url:
             return "-"
         return format_html('<img src="{}" alt="{}" width="64" height="64" style="object-fit:contain" />', image_url, obj.product_title or obj.asin)
+
+    @admin.display(description="Product")
+    def product_summary(self, obj):
+        return format_html("<strong>{}</strong><br><small>{}</small>", _compact_title(obj.product_title), obj.brand or "Brand not set")
+
+    @admin.display(description="Extraction", ordering="status")
+    def extraction_status_badge(self, obj):
+        return _status_badge(obj.get_status_display(), label=obj.get_status_display())
+
+    @admin.display(description="Match status")
+    def match_status(self, obj):
+        matches = getattr(obj, "dashboard_matches", None)
+        latest = matches[0] if matches else obj.product_matches.order_by("-updated_at").first()
+        if not latest:
+            return _status_badge("unmatched", label="No match")
+        return _status_badge(latest.get_match_status_display(), label=latest.get_match_status_display())
 
     @admin.display(description="Approval")
     def approval_status_display(self, obj):
@@ -1180,9 +1236,9 @@ class ProductMatchAdmin(admin.ModelAdmin):
     form = ProductMatchAdminForm
     change_form_template = "admin/importer/productmatch/change_form.html"
     list_display = (
-        "product_image", "amazon_asin", "amazon_title", "flipkart_pid", "flipkart_title",
-        "score", "confidence", "match_status", "publish_category_display",
-        "batch_display", "published", "updated_at",
+        "product_image", "amazon_product_summary", "flipkart_product_summary",
+        "score_badge", "confidence_badge", "match_status_badge", "price_difference",
+        "updated_at",
     )
     search_fields = (
         "amazon_product__asin", "amazon_product__product_title",
@@ -1205,6 +1261,11 @@ class ProductMatchAdmin(admin.ModelAdmin):
         "published_by", "published_at", "created_at", "updated_at",
         "published_product_link", "publish_category_display", "published",
     )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            "amazon_product", "flipkart_product", "publish_category", "published_product"
+        ).prefetch_related("publish_categories", "batches__keyword")
     fieldsets = (
         ("Products", {"fields": ("amazon_product", "flipkart_product", "published_product_link")}),
         ("Amazon product", {"fields": ("amazon_asin", "amazon_title", "amazon_brand", "amazon_model", "amazon_storage", "amazon_ram", "amazon_color", "amazon_processor", "amazon_display", "amazon_image", "amazon_url", "amazon_price")}),
@@ -1337,6 +1398,42 @@ class ProductMatchAdmin(admin.ModelAdmin):
 
     def _flipkart_value(self, obj, field):
         return getattr(obj.flipkart_product, field, "") or "-"
+
+    @admin.display(description="Amazon product")
+    def amazon_product_summary(self, obj):
+        return format_html(
+            "<strong>{}</strong><br><small>{}</small>",
+            _compact_title(obj.amazon_product.product_title),
+            obj.amazon_product.asin,
+        )
+
+    @admin.display(description="Flipkart product")
+    def flipkart_product_summary(self, obj):
+        return format_html(
+            "<strong>{}</strong><br><small>{}</small>",
+            _compact_title(obj.flipkart_product.product_title),
+            obj.flipkart_product.pid,
+        )
+
+    @admin.display(description="Score", ordering="score")
+    def score_badge(self, obj):
+        return format_html('<strong class="vg-score">{}</strong>', obj.score)
+
+    @admin.display(description="Confidence", ordering="confidence")
+    def confidence_badge(self, obj):
+        return _status_badge(obj.get_confidence_display(), label=obj.get_confidence_display())
+
+    @admin.display(description="Status", ordering="match_status")
+    def match_status_badge(self, obj):
+        return _status_badge(obj.get_match_status_display(), label=obj.get_match_status_display())
+
+    @admin.display(description="Price difference")
+    def price_difference(self, obj):
+        amazon_price = obj.amazon_product.current_selling_price_inr
+        flipkart_price = obj.flipkart_product.current_selling_price_inr
+        if amazon_price is None or flipkart_price is None:
+            return "—"
+        return f"₹{flipkart_price - amazon_price:+,}"
 
     @admin.display(description="Publish category")
     def publish_category_display(self, obj):

@@ -87,6 +87,7 @@ if not DEBUG:
 
 # Applications
 INSTALLED_APPS = [
+    'jazzmin',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -100,6 +101,76 @@ INSTALLED_APPS = [
     'apps.subscribers',
     'apps.importer',
 ]
+
+
+# Jazzmin themes the existing Django admin; all model registrations and
+# workflows continue to come from the project's current ModelAdmin classes.
+JAZZMIN_SETTINGS = {
+    "site_title": "VirtuGadgets Operations",
+    "site_header": "VirtuGadgets",
+    "site_brand": "VirtuGadgets",
+    "welcome_sign": "Marketplace operations console",
+    "copyright": "VirtuGadgets",
+    "show_sidebar": True,
+    "navigation_expanded": False,
+    "hide_models": ["auth.Group"],
+    "search_model": [
+        "importer.AmazonProduct",
+        "importer.FlipkartProduct",
+        "importer.ProductMatch",
+        "importer.ImporterJob",
+    ],
+    "order_with_respect_to": [
+        "products",
+        "importer",
+        "categories",
+        "subscribers",
+        "auth",
+    ],
+    "icons": {
+        "products.Product": "fas fa-box-open",
+        "importer.AmazonProduct": "fab fa-amazon",
+        "importer.FlipkartProduct": "fas fa-store",
+        "importer.ProductMatch": "fas fa-code-compare",
+        "importer.ImporterJob": "fas fa-list-check",
+        "importer.ImportBatch": "fas fa-layer-group",
+        "importer.SearchKeyword": "fas fa-magnifying-glass",
+        "importer.AmazonSearchResult": "fab fa-amazon",
+        "importer.FlipkartSearchResult": "fas fa-store",
+        "products.ProductPrice": "fas fa-tags",
+        "categories.Category": "fas fa-folder-tree",
+        "auth.User": "fas fa-user",
+        "auth.Group": "fas fa-users",
+    },
+    "topmenu_links": [
+        {"name": "Operations dashboard", "url": "admin:index", "permissions": ["auth.view_user"]},
+    ],
+    "related_modal_active": True,
+    "changeform_format": "horizontal_tabs",
+}
+
+JAZZMIN_UI_TWEAKS = {
+    # Keep Jazzmin's bundled AdminLTE styling as the baseline. This also
+    # avoids requiring a collected Bootswatch manifest for admin previews.
+    "theme": "default",
+    "dark_mode_theme": None,
+    "navbar_small_text": False,
+    "body_small_text": False,
+    "footer_small_text": False,
+    "sidebar_nav_small_text": False,
+    "sidebar_disable_expand": False,
+    "sidebar_nav_child_indent": True,
+    "navbar_fixed": True,
+    "sidebar_fixed": True,
+    "button_classes": {
+        "primary": "btn-primary",
+        "secondary": "btn-outline-secondary",
+        "info": "btn-info",
+        "warning": "btn-warning",
+        "danger": "btn-danger",
+        "success": "btn-success",
+    },
+}
 
 
 # Middleware
@@ -191,7 +262,11 @@ STORAGES = {
         'BACKEND': 'django.core.files.storage.FileSystemStorage',
     },
     'staticfiles': {
-        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        'BACKEND': (
+            'django.contrib.staticfiles.storage.StaticFilesStorage'
+            if DEBUG
+            else 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+        ),
     },
 }
 

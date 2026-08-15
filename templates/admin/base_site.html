@@ -1,0 +1,12 @@
+{% extends "admin/base.html" %}
+{% load static %}
+{% get_static_prefix as STATIC_PREFIX %}
+
+{% block title %}{{ title }} | VirtuGadgets Operations{% endblock %}
+{% block branding %}
+  <div id="site-name"><a href="{% url 'admin:index' %}">VirtuGadgets <span class="vg-brand-subtitle">Operations</span></a></div>
+{% endblock %}
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{{ STATIC_PREFIX }}admin/virtugadgets.css">
+{% endblock %}

@@ -1,5 +1,38 @@
 {% extends "admin/change_form.html" %}
 
+{% block form_top %}
+  <div class="vg-match-comparison" aria-label="Marketplace product comparison">
+    <section class="vg-match-side">
+      <p class="vg-eyebrow">Amazon</p>
+      {% if original.amazon_product.images.0 %}<img src="{{ original.amazon_product.images.0 }}" alt="Amazon product" class="vg-match-image">{% endif %}
+      <h2>{{ original.amazon_product.product_title|default:original.amazon_product.asin }}</h2>
+      <dl>
+        <dt>Brand</dt><dd>{{ original.amazon_product.brand|default:"—" }}</dd>
+        <dt>RAM</dt><dd>{{ original.amazon_product.ram|default:"—" }}</dd>
+        <dt>Storage</dt><dd>{{ original.amazon_product.storage|default:"—" }}</dd>
+        <dt>Price</dt><dd>{% if original.amazon_product.current_selling_price_inr %}₹{{ original.amazon_product.current_selling_price_inr }}{% else %}—{% endif %}</dd>
+      </dl>
+    </section>
+    <section class="vg-match-side">
+      <p class="vg-eyebrow">Flipkart</p>
+      {% if original.flipkart_product.images.0 %}<img src="{{ original.flipkart_product.images.0 }}" alt="Flipkart product" class="vg-match-image">{% endif %}
+      <h2>{{ original.flipkart_product.product_title|default:original.flipkart_product.pid }}</h2>
+      <dl>
+        <dt>Brand</dt><dd>{{ original.flipkart_product.brand|default:"—" }}</dd>
+        <dt>RAM</dt><dd>{{ original.flipkart_product.ram|default:"—" }}</dd>
+        <dt>Storage</dt><dd>{{ original.flipkart_product.storage|default:"—" }}</dd>
+        <dt>Price</dt><dd>{% if original.flipkart_product.current_selling_price_inr %}₹{{ original.flipkart_product.current_selling_price_inr }}{% else %}—{% endif %}</dd>
+      </dl>
+    </section>
+  </div>
+  <div class="vg-match-result">
+    <strong>Score {{ original.score }}</strong>
+    <span class="vg-admin-status vg-admin-status-{{ original.confidence }}">{{ original.get_confidence_display }}</span>
+    <span>{{ original.get_match_status_display }}</span>
+  </div>
+  {{ block.super }}
+{% endblock %}
+
 {% block submit_buttons_bottom %}
   <div class="submit-row">
     <input type="submit" name="_save_category" value="Save Category">
