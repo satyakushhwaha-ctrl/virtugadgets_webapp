@@ -1560,6 +1560,64 @@ class ImporterAdminTests(TestCase):
 
         self.assertIn("extract_amazon_products", model_admin.actions)
 
+    def test_product_match_list_uses_amazon_thumbnail(self):
+        amazon = AmazonProduct.objects.create(
+            asin="B0ADMINIMAGE1",
+            product_title="Example phone",
+            url="https://www.amazon.in/dp/B0ADMINIMAGE1",
+            images=["https://images.example/phone.jpg"],
+        )
+        result = FlipkartSearchResult.objects.create(
+            amazon_product=amazon,
+            pid="MOBADMINIMAGE1",
+            title="Example phone",
+            product_url="https://www.flipkart.com/example/p/x?pid=MOBADMINIMAGE1",
+            position=1,
+        )
+        flipkart = FlipkartProduct.objects.create(
+            search_result=result,
+            pid=result.pid,
+            url=result.product_url,
+        )
+        match = ProductMatch.objects.create(
+            amazon_product=amazon,
+            flipkart_product=flipkart,
+        )
+
+        model_admin = ProductMatchAdmin(ProductMatch, admin.site)
+        rendered = str(model_admin.product_image(match))
+
+        self.assertIn("https://images.example/phone.jpg", rendered)
+        self.assertIn('width="64"', rendered)
+        self.assertIn('height="64"', rendered)
+
+    def test_product_match_list_uses_placeholder_without_amazon_image(self):
+        amazon = AmazonProduct.objects.create(
+            asin="B0ADMINIMAGE2",
+            product_title="Example phone",
+            url="https://www.amazon.in/dp/B0ADMINIMAGE2",
+        )
+        result = FlipkartSearchResult.objects.create(
+            amazon_product=amazon,
+            pid="MOBADMINIMAGE2",
+            title="Example phone",
+            product_url="https://www.flipkart.com/example/p/x?pid=MOBADMINIMAGE2",
+            position=1,
+        )
+        flipkart = FlipkartProduct.objects.create(
+            search_result=result,
+            pid=result.pid,
+            url=result.product_url,
+        )
+        match = ProductMatch.objects.create(
+            amazon_product=amazon,
+            flipkart_product=flipkart,
+        )
+
+        model_admin = ProductMatchAdmin(ProductMatch, admin.site)
+
+        self.assertIn("No image", str(model_admin.product_image(match)))
+
     def make_best_match_product(self, asin="B0BEST000001"):
         return AmazonProduct.objects.create(
             asin=asin,

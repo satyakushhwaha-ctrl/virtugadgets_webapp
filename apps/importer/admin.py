@@ -1180,7 +1180,7 @@ class ProductMatchAdmin(admin.ModelAdmin):
     form = ProductMatchAdminForm
     change_form_template = "admin/importer/productmatch/change_form.html"
     list_display = (
-        "amazon_asin", "amazon_title", "flipkart_pid", "flipkart_title",
+        "product_image", "amazon_asin", "amazon_title", "flipkart_pid", "flipkart_title",
         "score", "confidence", "match_status", "publish_category_display",
         "batch_display", "published", "updated_at",
     )
@@ -1368,6 +1368,17 @@ class ProductMatchAdmin(admin.ModelAdmin):
     def amazon_asin(self, obj):
         url = reverse("admin:importer_amazonproduct_change", args=[obj.amazon_product.pk])
         return format_html('<a href="{}">{}</a>', url, obj.amazon_product.asin)
+    @admin.display(description="Product Image")
+    def product_image(self, obj):
+        image_url = first_valid_image_url(obj.amazon_product)
+        if not image_url:
+            return format_html('<span class="product-match-no-image">No image</span>')
+        return format_html(
+            '<img src="{}" alt="{}" width="64" height="64" '
+            'style="object-fit:contain;" />',
+            image_url,
+            obj.amazon_product.product_title or obj.amazon_product.asin,
+        )
     @admin.display(description="Amazon title")
     def amazon_title(self, obj): return obj.amazon_product.product_title or "-"
     @admin.display(description="Amazon model")

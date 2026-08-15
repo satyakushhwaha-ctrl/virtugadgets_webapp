@@ -270,6 +270,17 @@ class ProductDetailViewTests(TestCase):
         ):
             self.assertContains(response, value)
 
+    def test_product_information_precedes_overview_on_detail_page(self) -> None:
+        response = self.client.get(
+            reverse("product-detail", kwargs={"slug": self.product.slug})
+        )
+
+        content = response.content.decode()
+        self.assertLess(
+            content.index('id="specifications-heading"'),
+            content.index('id="description-heading"'),
+        )
+
     def test_inactive_product_returns_404(self) -> None:
         self.product.is_active = False
         self.product.save(update_fields=["is_active"])
