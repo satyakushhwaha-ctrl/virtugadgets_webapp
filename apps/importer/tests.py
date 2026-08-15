@@ -258,6 +258,28 @@ class ImporterTests(TestCase):
         self.assertEqual(product["primary_seller"], "Example Seller")
         scraper.assert_called_once()
 
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data")
+    def test_new_amazon_scraper_shape_maps_nested_fields(self, scraper):
+        scraper.return_value = {
+            "url": "https://www.amazon.in/dp/B000000001",
+            "product": {"asin": "B000000001", "title": "Nested phone", "brand": "Example"},
+            "pricing": {"selling_price": 45000, "mrp": 50000, "min_price": 45000, "max_price": 45000, "discount_percentage": 10},
+            "seller": {"name": "Buy Box Seller", "rating": 4.7},
+            "availability": {"status": "IN_STOCK"},
+            "images": ["https://images.example/first.jpg"],
+            "specifications": {"Processor Name": "Example CPU", "Weight": "1340 Grams", "Colour": "Black"},
+        }
+        result = self.make_search_result()
+
+        self.assertTrue(process_amazon_search_result(result))
+        product = AmazonProduct.objects.get(asin=result.asin)
+        self.assertEqual(product.current_selling_price_inr, 45000)
+        self.assertEqual(product.mrp_inr, 50000)
+        self.assertEqual(product.images[0], "https://images.example/first.jpg")
+        self.assertEqual(product.processor, "Example CPU")
+        self.assertEqual(float(product.weight_kg), 1.34)
+        self.assertEqual(product.approval_status, "pending")
+
     @patch("apps.importer.services.amazon_search._scrape_search_results")
     def test_search_service_normalises_and_deduplicates_response(self, scraper):
         scraper.return_value = [
@@ -433,8 +455,66 @@ class ImporterTests(TestCase):
 
         query = build_flipkart_search_query(product)
 
-        self.assertEqual(query, "Apple iPhone 16 128 GB 8 GB Black")
+        self.assertEqual(query, "Apple iPhone 16 8GB 128GB Black")
         self.assertNotIn("Latest Phone", query)
+
+    def test_product_aware_laptop_query_prioritizes_model_and_core_specs(self):
+        product = self.make_completed_amazon_product(
+            title=(
+                "HP Victus, AMD Ryzen 7 7445HS, 6GB RTX 4050, 16GB DDR5, "
+                "512GB SSD, fb3130AX Gaming Laptop, Blue, Office24, Xbox GamePass"
+            )
+        )
+        product.brand = "HP"
+        product.processor = "AMD Ryzen 7 7445HS"
+        product.ram = "16 GB"
+        product.storage = "512 GB SSD"
+        product.save()
+
+        query = build_flipkart_search_query(product)
+
+        for value in ("HP", "Victus", "fb3130AX", "Ryzen 7 7445HS", "RTX 4050", "16GB", "512GB"):
+            self.assertIn(value, query)
+        for noise in ("Xbox", "GamePass", "Office24", "Blue", "Upgradeable", "2.29kg"):
+            self.assertNotIn(noise.casefold(), query.casefold())
+
+    def test_product_aware_queries_cover_phone_tv_and_headphones(self):
+        phone = self.make_completed_amazon_product(title="Apple iPhone 16 256GB")
+        phone.brand = "Apple"
+        phone.storage = "256GB"
+        phone.save()
+        self.assertEqual(build_flipkart_search_query(phone), "Apple iPhone 16 8GB 256GB Black")
+
+        tv = self.make_completed_amazon_product(asin="B0FQFTV1NQ", title="Samsung 55 inch 4K QLED Smart TV")
+        tv.brand = "Samsung"
+        tv.save()
+        tv_query = build_flipkart_search_query(tv)
+        self.assertIn("Samsung", tv_query)
+        self.assertIn("55", tv_query)
+        self.assertIn("4K", tv_query)
+        self.assertIn("QLED", tv_query)
+
+        headphones = self.make_completed_amazon_product(asin="B0FQFTV1NR", title="Sony WH-1000XM5 Wireless Headphones")
+        headphones.brand = "Sony"
+        headphones.save()
+        self.assertIn("Sony", build_flipkart_search_query(headphones))
+        self.assertIn("WH-1000XM5", build_flipkart_search_query(headphones))
+
+    def test_product_aware_query_uses_available_fields_without_empty_values(self):
+        product = self.make_completed_amazon_product(title="Lenovo ThinkPad 21T9005VIG")
+        product.brand = "Lenovo"
+        product.processor = ""
+        product.ram = ""
+        product.storage = ""
+        product.save()
+
+        queries = build_flipkart_search_queries(product)
+
+        self.assertTrue(queries)
+        self.assertIn("Lenovo", queries[0])
+        self.assertIn("21T9005VIG", queries[0])
+        self.assertNotIn("None", queries[0])
+        self.assertNotIn("  ", queries[0])
 
     def test_weight_is_never_used_as_storage_or_ram(self):
         product = self.make_completed_amazon_product(
@@ -448,7 +528,7 @@ class ImporterTests(TestCase):
 
         query = build_flipkart_search_query(product)
 
-        self.assertEqual(query, "Apple iPhone Air 256 GB Light Gold")
+        self.assertEqual(query, "Apple iPhone Air 256GB Light Gold")
         self.assertNotIn("0.1", query)
         self.assertNotIn("weight", query.casefold())
 
@@ -460,8 +540,8 @@ class ImporterTests(TestCase):
 
         query = build_flipkart_search_query(product)
 
-        self.assertIn("256 GB", query)
-        self.assertIn("8 GB", query)
+        self.assertIn("256GB", query)
+        self.assertIn("8GB", query)
         self.assertNotIn("ROM", query)
         self.assertNotIn("RAM", query)
 
@@ -477,9 +557,10 @@ class ImporterTests(TestCase):
         queries = build_flipkart_search_queries(product)
 
         self.assertEqual(queries, [
-            "Apple iPhone Air 256 GB Light Gold",
-            "Apple iPhone Air 256 GB",
+            "Apple iPhone Air 256GB Light Gold",
             "Apple iPhone Air",
+            "Apple iPhone Air 256GB",
+            "Apple",
         ])
 
     @patch("apps.importer.services.flipkart_search._scrape_search_results")
@@ -615,12 +696,12 @@ class ImporterTests(TestCase):
         summary = search_and_save_flipkart_candidates(product)
 
         self.assertEqual(search.call_count, 2)
-        self.assertEqual(summary.query, "Apple iPhone Air 256 GB")
+        self.assertEqual(summary.query, "Apple iPhone Air")
         self.assertEqual(
             [(attempt.query, attempt.candidates_found) for attempt in summary.attempts],
             [
-                ("Apple iPhone Air 256 GB Light Gold", 0),
-                ("Apple iPhone Air 256 GB", 1),
+                ("Apple iPhone Air 256GB Light Gold", 0),
+                ("Apple iPhone Air", 1),
             ],
         )
 
@@ -744,6 +825,27 @@ class ImporterTests(TestCase):
         self.assertEqual(product.status, ImportStatus.COMPLETED)
         self.assertEqual(product.product_title, "Apple iPhone Air")
         self.assertIsNotNone(product.extracted_at)
+
+    @patch("apps.importer.services.flipkart_product.extract_flipkart_product_data")
+    def test_new_flipkart_scraper_shape_maps_nested_fields(self, scraper):
+        scraper.return_value = {
+            "url": "https://www.flipkart.com/phone/p/itm1?pid=MOB123456789",
+            "product": {"pid": "MOB123456789", "sku": "MOB123456789", "title": "Nested phone", "brand": "Example"},
+            "pricing": {"selling_price": 89999, "mrp": 99999, "min_price": 89999, "max_price": 89999, "discount_percentage": 10},
+            "seller": {"name": "RetailNet", "id": "SELLER1"},
+            "availability": {"status": "IN_STOCK"},
+            "images": ["https://rukminim2.flixcart.com/first.jpg"],
+            "specifications": {"RAM": "8 GB", "Storage": "256 GB"},
+        }
+        result = self.make_flipkart_search_result()
+
+        self.assertTrue(process_flipkart_search_result(result))
+        product = FlipkartProduct.objects.get(pid=result.pid)
+        self.assertEqual(product.current_selling_price_inr, 89999)
+        self.assertEqual(product.mrp_inr, 99999)
+        self.assertEqual(product.images[0], "https://rukminim2.flixcart.com/first.jpg")
+        self.assertEqual(product.ram, "8 GB")
+        self.assertEqual(product.approval_status, "pending")
 
     @patch("apps.importer.services.flipkart_product.extract_flipkart_product")
     def test_failed_flipkart_extraction_is_retryable(self, extractor):
@@ -952,6 +1054,36 @@ class ImporterTests(TestCase):
 
         self.assertEqual(result["match_status"], "rejected")
         self.assertTrue(result["reasons"]["ram"]["hard_mismatch"])
+
+    def test_phone_accessories_are_hard_rejected(self):
+        amazon, _ = self.make_matching_pair(
+            flipkart_title="Apple iPhone Air 256 GB Light Gold",
+        )
+        for accessory_title in (
+            "Phone Case for Apple iPhone Air",
+            "Screen Guard for Apple iPhone Air",
+            "Back Camera Lens Glass Protector for Apple iPhone Air",
+            "Charger for Apple iPhone Air",
+        ):
+            with self.subTest(accessory_title=accessory_title):
+                search_result = FlipkartSearchResult.objects.create(
+                    amazon_product=amazon,
+                    pid=f"MOBACCESS{abs(hash(accessory_title)) % 1000000}",
+                    title=accessory_title,
+                    product_url="https://www.flipkart.com/accessory/p/itm1",
+                    position=2,
+                )
+                accessory = FlipkartProduct.objects.create(
+                    search_result=search_result,
+                    pid=search_result.pid,
+                    product_title=accessory_title,
+                    brand="Apple",
+                    url=search_result.product_url,
+                    status=ImportStatus.COMPLETED,
+                )
+                result = match_products(amazon, accessory)
+                self.assertEqual(result["match_status"], "rejected")
+                self.assertTrue(result["reasons"]["product_type"]["hard_mismatch"])
 
     def test_matching_service_does_not_write_database(self):
         amazon, flipkart = self.make_matching_pair()
@@ -1208,6 +1340,71 @@ class ImporterAdminTests(TestCase):
         self.assertEqual(ranked[0]["candidate"].title, candidates[0])
         self.assertGreater(ranked[0]["score"], ranked[1]["score"])
 
+    def test_samsung_model_modifiers_are_hard_identity_signals(self):
+        amazon = SimpleNamespace(
+            product_title="Samsung Galaxy S25 Ultra 5G Smartphone 12GB RAM 256GB Storage Titanium Gray",
+            brand="Samsung",
+            processor="",
+            ram="12 GB",
+            storage="256 GB",
+            operating_system="",
+            color="Titanium Gray",
+        )
+        titles = {
+            "ultra": "Samsung S25 Ultra 5G (Titanium Gray, 256 GB)",
+            "edge": "Samsung Galaxy S25 Edge 5G (Titanium Black, 256 GB)",
+            "fe": "Samsung Galaxy S25 FE 5G (Navy, 256 GB)",
+            "base": "Samsung Galaxy S25 5G (Mint, 256 GB)",
+            "generation": "Samsung Galaxy S24 Ultra 5G (Gray, 256 GB)",
+        }
+        results = {
+            name: rank_flipkart_search_result(
+                amazon,
+                SimpleNamespace(title=title, position=index, pk=name),
+            )
+            for index, (name, title) in enumerate(titles.items())
+        }
+
+        self.assertEqual(results["ultra"]["match_status"], "matched")
+        self.assertEqual(results["ultra"]["confidence"], "high")
+        for name in ("edge", "fe", "base", "generation"):
+            self.assertEqual(results[name]["match_status"], "rejected")
+            self.assertIn("model", results[name]["signals"]["conflicts"])
+        self.assertGreater(results["ultra"]["score"], results["edge"]["score"])
+
+    def test_samsung_unknown_ram_is_not_a_conflict(self):
+        amazon = SimpleNamespace(
+            product_title="Samsung Galaxy S25 Ultra 256GB Titanium Gray",
+            brand="Samsung", processor="", ram="12 GB", storage="256 GB",
+            operating_system="", color="Titanium Gray",
+        )
+        result = rank_flipkart_search_result(
+            amazon,
+            SimpleNamespace(
+                title="Samsung S25 Ultra 5G (Titanium Gray, 256 GB)",
+                position=1,
+                pk="unknown-ram",
+            ),
+        )
+        self.assertEqual(result["match_status"], "matched")
+        self.assertNotIn("ram", result["signals"]["conflicts"])
+
+    def test_samsung_color_prefers_exact_variant_without_rejecting_other_color(self):
+        amazon = SimpleNamespace(
+            product_title="Samsung Galaxy S25 Ultra 256GB Titanium Gray",
+            brand="Samsung", processor="", ram="12 GB", storage="256 GB",
+            operating_system="", color="Titanium Gray",
+        )
+        gray = rank_flipkart_search_result(
+            amazon, SimpleNamespace(title="Samsung S25 Ultra (Titanium Gray, 256 GB)", position=1, pk="gray")
+        )
+        black = rank_flipkart_search_result(
+            amazon, SimpleNamespace(title="Samsung S25 Ultra (Titanium Black, 256 GB)", position=2, pk="black")
+        )
+        self.assertEqual(gray["match_status"], "matched")
+        self.assertEqual(black["match_status"], "matched")
+        self.assertGreater(gray["score"], black["score"])
+
     def test_exact_victus_title_matches_even_without_structured_amazon_specs(self):
         amazon = SimpleNamespace(
             product_title=(
@@ -1236,6 +1433,92 @@ class ImporterAdminTests(TestCase):
 
         self.assertGreaterEqual(result["score"], 90)
         self.assertEqual(result["confidence"], "high")
+
+    def test_model_prefix_and_marketing_word_normalization_match(self):
+        amazon = SimpleNamespace(
+            product_title="HP Victus Ryzen 7 7445HS 16GB 512GB SSD RTX 4050 fb3130AX",
+            brand="HP",
+            processor="",
+            ram="",
+            storage="",
+            operating_system="",
+        )
+        candidate = SimpleNamespace(
+            title="HP Victus AMD Ryzen 7 Hexa Core 7445HS 16 GB/512 GB SSD 6 GB Graphics RTX 4050 15-fb3130AX",
+            position=1,
+            pk="prefixed-model",
+        )
+
+        result = rank_flipkart_search_result(amazon, candidate)
+
+        self.assertEqual(result["confidence"], "high")
+        self.assertEqual(result["match_status"], "matched")
+        self.assertTrue(result["signals"]["model_match"])
+        self.assertFalse(result["signals"]["conflicts"])
+
+    def test_core_spec_conflicts_reject_candidate(self):
+        amazon = SimpleNamespace(
+            product_title="HP Victus Ryzen 7 7445HS 16GB 512GB SSD RTX 4050 fb3130AX",
+            brand="HP",
+            processor="Ryzen 7 7445HS",
+            ram="16 GB",
+            storage="512 GB SSD",
+            operating_system="Windows 11",
+        )
+        conflicting_titles = (
+            "HP Victus Ryzen 7 7445HS 16GB 512GB SSD RTX 4060 fb3130AX",
+            "HP Victus Ryzen 7 7445HS 8GB 512GB SSD RTX 4050 fb3130AX",
+            "HP Victus Ryzen 5 7535HS 16GB 512GB SSD RTX 4050 fb3130AX",
+            "HP Victus Ryzen 7 7445HS 16GB 1TB SSD RTX 4050 fb3130AX",
+        )
+
+        for title in conflicting_titles:
+            with self.subTest(title=title):
+                result = rank_flipkart_search_result(
+                    amazon,
+                    SimpleNamespace(title=title, position=1, pk=title),
+                )
+                self.assertEqual(result["match_status"], "rejected")
+                self.assertEqual(result["confidence"], "low")
+                self.assertTrue(result["signals"]["conflicts"])
+
+    def test_missing_optional_spec_does_not_reject_identity_match(self):
+        amazon = SimpleNamespace(
+            product_title="HP Victus Ryzen 7 7445HS 16GB 512GB SSD fb3130AX",
+            brand="HP",
+            processor="Ryzen 7 7445HS",
+            ram="16 GB",
+            storage="512 GB SSD",
+            operating_system="Windows 11",
+        )
+        candidate = SimpleNamespace(
+            title="HP Victus AMD Ryzen 7 Hexa Core 7445HS 16 GB/512 GB SSD 15-fb3130AX",
+            position=1,
+            pk="missing-gpu",
+        )
+
+        result = rank_flipkart_search_result(amazon, candidate)
+
+        self.assertEqual(result["match_status"], "matched")
+        self.assertEqual(result["confidence"], "high")
+
+    def test_search_accessory_is_rejected_even_with_exact_model_tokens(self):
+        amazon = SimpleNamespace(
+            product_title="Samsung Galaxy S25 Ultra 12GB 256GB Titanium Gray",
+            brand="Samsung",
+            ram="12GB",
+            storage="256GB",
+        )
+        candidate = SimpleNamespace(
+            title="WELLDESIGN Back Camera Lens Glass Protector for Samsung Galaxy S25 Ultra 256GB",
+            position=1,
+            pk="accessory-search-result",
+        )
+
+        result = rank_flipkart_search_result(amazon, candidate)
+
+        self.assertEqual(result["match_status"], "rejected")
+        self.assertEqual(result["signals"]["conflicts"]["product_type"], ["accessory"])
 
     def test_truncated_victus_search_title_still_selects_six_gb_candidate(self):
         amazon = SimpleNamespace(

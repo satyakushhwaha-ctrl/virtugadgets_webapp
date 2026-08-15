@@ -10,7 +10,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from apps.categories.models import Category
-from apps.importer.models import AmazonProduct
+from apps.importer.models import AmazonProduct, ImportStatus
 from apps.products.management.commands.seed_products import PRODUCTS
 from apps.products.models import Product, ProductPrice
 from apps.products.services import build_product_card
@@ -237,6 +237,38 @@ class ProductDetailViewTests(TestCase):
         self.assertContains(response, "Related product 4")
         self.assertNotContains(response, "Different category product")
         self.assertEqual(len(response.context["related_products"]), 4)
+
+    def test_product_detail_renders_published_amazon_extracted_details(self) -> None:
+        amazon = AmazonProduct.objects.create(
+            asin="B0DETAILTEST",
+            product_title="Samsung Galaxy S25 Ultra",
+            brand="Samsung",
+            url="https://www.amazon.in/dp/B0DETAILTEST",
+            description="AI smartphone with a 200MP camera.",
+            highlights=["S Pen included", "Long battery life"],
+            specifications={"Camera": "200 MP", "Connectivity": "5G"},
+            ram="12GB",
+            storage="256GB",
+            processor="Snapdragon 8 Elite",
+            operating_system="Android 15",
+            display_size="6.9 inch",
+            color="Titanium Gray",
+            status=ImportStatus.COMPLETED,
+            published=True,
+            published_product=self.product,
+        )
+
+        response = self.client.get(
+            reverse("product-detail", kwargs={"slug": self.product.slug})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        for value in (
+            "Samsung Galaxy S25 Ultra", "12GB", "256GB", "Snapdragon 8 Elite",
+            "Android 15", "6.9 inch", "Titanium Gray", "AI smartphone with a 200MP camera.",
+            "S Pen included", "200 MP", "5G",
+        ):
+            self.assertContains(response, value)
 
     def test_inactive_product_returns_404(self) -> None:
         self.product.is_active = False

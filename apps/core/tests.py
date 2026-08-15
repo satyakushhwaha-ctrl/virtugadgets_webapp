@@ -214,9 +214,28 @@ class ImporterJobTests(TestCase):
             keyword=self.keyword, asin="B0CELERY0002", title="Laptop",
             product_url="https://www.amazon.in/dp/B0CELERY0002", position=1,
         )
+        AmazonProduct.objects.create(
+            asin=source.asin, url=source.product_url,
+        )
         result = amazon_product_extraction_task.run(str(source.pk))
         service.assert_called_once_with(AmazonSearchResult.objects.get(pk=source.pk))
         self.assertEqual(result["status"], "completed")
+        job = ImporterJob.objects.get(pk=result["job_id"])
+        self.assertEqual(job.status, ImporterJobStatus.COMPLETED)
+        self.assertEqual(job.celery_task_id, "")
+        self.assertEqual(job.amazon_product.asin, source.asin)
+
+    @patch("apps.importer.services.amazon_product.process_amazon_search_result", side_effect=RuntimeError("Amazon detail failed"))
+    def test_amazon_extraction_task_records_failure_reason(self, service):
+        source = AmazonSearchResult.objects.create(
+            keyword=self.keyword, asin="B0CELERYFAIL1", title="Laptop",
+            product_url="https://www.amazon.in/dp/B0CELERYFAIL1", position=1,
+        )
+        with self.assertRaises(RuntimeError):
+            amazon_product_extraction_task.run(str(source.pk))
+        job = ImporterJob.objects.filter(title__contains=source.asin).get()
+        self.assertEqual(job.status, ImporterJobStatus.FAILED)
+        self.assertIn("Amazon detail failed", job.error_message)
 
     @patch("apps.importer.services.flipkart_search_results.run_flipkart_search_for_keyword")
     def test_flipkart_search_task_loads_id_and_reuses_service(self, service):
@@ -231,9 +250,28 @@ class ImporterJobTests(TestCase):
             amazon_product=self.amazon, pid="MOBCELERY0001", title="HP Victus",
             product_url="https://www.flipkart.com/p?pid=MOBCELERY0001", position=1,
         )
+        from apps.importer.models import FlipkartProduct
+        FlipkartProduct.objects.create(
+            search_result=source, pid=source.pid, url=source.product_url,
+        )
         result = flipkart_product_extraction_task.run(str(source.pk))
         service.assert_called_once_with(FlipkartSearchResult.objects.get(pk=source.pk))
         self.assertEqual(result["status"], "completed")
+        job = ImporterJob.objects.get(pk=result["job_id"])
+        self.assertEqual(job.status, ImporterJobStatus.COMPLETED)
+        self.assertEqual(job.flipkart_product.pid, source.pid)
+
+    @patch("apps.importer.services.flipkart_product.process_flipkart_search_result", side_effect=RuntimeError("Flipkart detail failed"))
+    def test_flipkart_extraction_task_records_failure_reason(self, service):
+        source = FlipkartSearchResult.objects.create(
+            amazon_product=self.amazon, pid="MOBCELERYFAIL1", title="HP Victus",
+            product_url="https://www.flipkart.com/p?pid=MOBCELERYFAIL1", position=1,
+        )
+        with self.assertRaises(RuntimeError):
+            flipkart_product_extraction_task.run(str(source.pk))
+        job = ImporterJob.objects.filter(title__contains=source.pid).get()
+        self.assertEqual(job.status, ImporterJobStatus.FAILED)
+        self.assertIn("Flipkart detail failed", job.error_message)
 
     @patch("apps.importer.services.flipkart_search_results.search_and_save_flipkart_candidates")
     def test_product_flipkart_search_task_accepts_product_id(self, service):

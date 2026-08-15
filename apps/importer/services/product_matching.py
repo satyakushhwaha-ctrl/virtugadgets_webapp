@@ -55,16 +55,262 @@ TITLE_STOPWORDS = {
 }
 
 SEARCH_MATCH_WEIGHTS = {
-    "model": 50,
+    "model": 35,
+    "family": 5,
     "cpu": 15,
     "gpu": 15,
     "gpu_memory": 5,
-    "ram": 7,
-    "storage": 7,
-    "brand": 3,
-    "series": 2,
-    "os": 1,
+    "ram": 8,
+    "storage": 10,
+    "color": 5,
+    "display": 5,
+    "brand": 10,
+    "os": 3,
+    "title": 5,
 }
+
+MODEL_MODIFIERS = {
+    "ultra", "edge", "fe", "plus", "pro", "max", "mini", "se", "air",
+    "fold", "flip",
+}
+
+ACCESSORY_PATTERNS = (
+    r"\bback\s*cover\b", r"\bflip\s*cover\b", r"\bphone\s*case\b",
+    r"\bcase\b", r"\bcover\b", r"\bscreen\s*(?:guard|protector)\b",
+    r"\btempered\s+glass\b", r"\b(?:camera|lens)\s*protector\b",
+    r"\bglass\s+protector\b", r"\bprotector\b", r"\bcharger\b",
+    r"\bcharging\s+cable\b", r"\busb\s+cable\b", r"\badapter\b",
+    r"\breplacement\b", r"\b(?:phone|mobile)\s+holder\b", r"\bskin\b",
+    r"\bsleeve\b", r"\bpouch\b", r"\bstrap\b", r"\bstand\b",
+    r"\b(?:mount|keyboard|mouse|stylus)\b", r"\bpen\s+replacement\b",
+)
+
+
+def classify_product_type(value) -> str:
+    """Classify a title/record for compatibility without changing the schema."""
+    text = _combined_search_text(value).casefold()
+    if any(re.search(pattern, text) for pattern in ACCESSORY_PATTERNS):
+        return "accessory"
+    if re.search(r"\b(?:smartphone|mobile\s+phone|iphone|galaxy\s+s\d+|pixel)\b", text):
+        return "smartphone"
+    if re.search(r"\b(?:laptop|notebook|macbook)\b", text):
+        return "laptop"
+    if re.search(r"\b(?:tablet|ipad)\b", text):
+        return "tablet"
+    if re.search(r"\b(?:television|tv|qled|oled)\b", text):
+        return "tv"
+    if re.search(r"\b(?:headphone|earphone|earbud|airpods)\b", text):
+        return "audio"
+    return "unknown"
+
+
+def _phone_model_signals(text: str) -> tuple[str, str, str]:
+    """Return normalized Samsung-style family, modifier, and identity."""
+    match = re.search(
+        r"\b(?:galaxy\s+)?s\s*(?P<number>\d{2})"
+        r"(?:\s*(?P<modifier>ultra|edge|fe|plus|pro|max|mini|se|air|fold|flip))?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return "", "", ""
+    family = f"s{match.group('number')}"
+    modifier = (match.group("modifier") or "").casefold()
+    return family, modifier, f"{family} {modifier}".strip()
+
+
+def _color_signals(value, text: str) -> set[str]:
+    field = normalize_text(getattr(value, "color", "")) if not isinstance(value, str) else ""
+    colors = {
+        "titanium gray", "titanium black", "titanium silverblue", "titanium silver",
+        "black", "white", "blue", "gray", "grey", "silver", "gold", "green",
+    }
+    found = {color for color in colors if color in text}
+    if field:
+        found.add(field)
+    return found
+
+GENERIC_IDENTITY_WORDS = {
+    "amd", "basic", "computer", "core", "ddr", "edition", "gaming",
+    "graphics", "hexa", "home", "inch", "inches", "laptop", "mobile",
+    "nvidia", "notebook", "office", "processor", "ram", "ssd", "thin",
+    "with", "windows", "work", "xbox", "upgradeable",
+}
+
+
+def _combined_search_text(value) -> str:
+    """Combine title and available structured fields for search candidates."""
+    if isinstance(value, str):
+        return value
+    return " ".join(
+        str(getattr(value, field, "") or "")
+        for field in (
+            "product_title", "title", "brand", "processor", "ram", "storage",
+            "operating_system", "display_size", "resolution",
+        )
+    )
+
+
+def _identity_signals(value) -> dict[str, object]:
+    """Extract marketplace-independent product identity signals.
+
+    Search result pages generally expose only a title, so these signals are
+    deliberately conservative and deterministic. Missing data is neutral;
+    contradictory data is a real negative signal.
+    """
+    raw = _combined_search_text(value)
+    text = normalize_text(raw)
+    tokens = set(normalized_title_tokens(text))
+    model_family, model_variant, phone_model = _phone_model_signals(text)
+
+    brand = normalize_text(getattr(value, "brand", "")) if not isinstance(value, str) else ""
+    if not brand:
+        brand = next((token for token in tokens if token in {
+            "acer", "apple", "asus", "dell", "hp", "lenovo", "msi", "samsung",
+            "oneplus", "realme", "xiaomi", "vivo", "infinix", "motorola",
+        }), "")
+
+    cpu = set()
+    for match in re.finditer(
+        r"\bryzen\s*(?P<tier>[3579])\s*(?:hexa\s*core\s*)?"
+        r"(?P<model>\d{4,5}[a-z]{0,3})\b",
+        text,
+    ):
+        cpu.add(f"ryzen{match.group('tier')} {match.group('model')}")
+    for match in re.finditer(
+        r"\b(?:intel\s+)?core\s*(?P<tier>i?[3579]|[3579])\s*"
+        r"(?:\d+(?:th|nd|rd|st)\s+gen\s*)?"
+        r"(?P<model>\d{3,5}[a-z]{0,3})\b",
+        text,
+    ):
+        cpu.add(f"core{match.group('tier').replace('i', 'i')} {match.group('model')}")
+    if not cpu:
+        for match in re.finditer(r"\bryzen\s*(?:ai\s*)?(?P<tier>[3579])\b", text):
+            cpu.add(f"ryzen{match.group('tier')}")
+        for match in re.finditer(r"\b(?:intel\s+)?core\s*(?P<tier>i?[3579]|[3579])\b", text):
+            cpu.add(f"core{match.group('tier')}")
+
+    gpu = {
+        re.sub(r"\s+", "", match.group(0))
+        for match in re.finditer(r"\b(?:rtx|gtx|rx|arc)\s*\d{3,4}\b", text)
+    }
+    gpu_memory = set()
+    for match in re.finditer(r"(?P<memory>\d+)\s*gb\s*graphics\b", text):
+        gpu_memory.add(f"{match.group('memory')}gb")
+    for match in re.finditer(
+        r"(?P<memory>\d+)\s*gb\s*(?:graphics|vram)?\s*"
+        r"(?:nvidia\s+)?(?:geforce\s+)?(?:rtx|gtx|rx|arc)\b",
+        text,
+    ):
+        gpu_memory.add(f"{match.group('memory')}gb")
+    for match in re.finditer(
+        r"(?:rtx|gtx|rx|arc)\s*\d{3,4}[^,;()]{0,25}?"
+        r"(?P<memory>\d+)\s*gb\s*(?:graphics|vram)",
+        text,
+    ):
+        gpu_memory.add(f"{match.group('memory')}gb")
+
+    storage = set()
+    for match in re.finditer(r"(?P<size>\d+(?:\.\d+)?)\s*(?P<unit>gb|tb)\s*"
+                             r"(?P<kind>nvme\s+)?(?:ssd|hdd|hard\s+drive)", text):
+        size = match.group("size")
+        if size.endswith(".0"):
+            size = size[:-2]
+        # Capacity is the stable cross-marketplace identity. SSD/NVMe/HDD
+        # wording is retained by the product extractor, but a search title
+        # that omits the medium must not conflict with the same capacity.
+        storage.add(f"{size}{match.group('unit')}")
+    if not storage:
+        field_storage = normalize_text(getattr(value, "storage", "")) if not isinstance(value, str) else ""
+        storage.update(
+            value.replace(" ", "")
+            for value in re.findall(r"\d+(?:\.\d+)?\s*(?:gb|tb)", field_storage)
+        )
+
+    capacities = {
+        f"{match.group('amount')}{match.group('unit')}"
+        for match in CAPACITY_PATTERN.finditer(text)
+    }
+    if not storage and capacities:
+        field_ram_text = normalize_text(getattr(value, "ram", "")) if not isinstance(value, str) else ""
+        explicit_ram = set(re.findall(r"\d+(?:\.\d+)?\s*(?:gb|tb)", field_ram_text))
+        storage_candidates = capacities - explicit_ram - gpu_memory
+        if storage_candidates:
+            storage.add(max(
+                storage_candidates,
+                key=lambda item: float(re.match(r"\d+(?:\.\d+)?", item).group()),
+            ))
+    ram = set()
+    for capacity in capacities:
+        if capacity not in gpu_memory and not any(
+            capacity.startswith(storage_value.split()[0]) for storage_value in storage
+        ):
+            ram.add(capacity)
+    field_ram = normalize_text(getattr(value, "ram", "")) if not isinstance(value, str) else ""
+    ram.update(
+        value.replace(" ", "")
+        for value in re.findall(r"\d+(?:\.\d+)?\s*(?:gb|tb)", field_ram)
+    )
+    # A graphics-memory token is not system RAM.
+    ram -= gpu_memory
+
+    os = set()
+    for match in re.finditer(r"\b(?:windows|win)\s*([0-9]{1,2})", text):
+        os.add(f"windows {match.group(1)}")
+    os.update(
+        f"{match.group(1)} {match.group(2)}"
+        for match in re.finditer(r"\b(windows)\s*(\d{1,2})", text)
+    )
+
+    model = set()
+    technical_prefixes = ("ryzen", "core", "rtx", "gtx", "radeon", "arc", "windows")
+    for token in tokens:
+        compact = token.replace("_", "")
+        if (
+            compact in {"m365", "windows11"}
+            or compact in cpu
+            or compact in gpu
+            or compact.startswith(technical_prefixes + ("win", "ddr"))
+        ):
+            continue
+        if re.fullmatch(r"[a-z]{2,}[0-9][a-z0-9-]*", compact):
+            # Marketplace display variants commonly prefix the same SKU with
+            # a screen size, e.g. 15-fb3130AX.
+            model.add(re.sub(r"^\d+-", "", compact))
+    if phone_model:
+        model = {phone_model}
+
+    family_tokens = {
+        token for token in tokens
+        if len(token) > 2
+        and token not in GENERIC_IDENTITY_WORDS
+        and token not in brand.split()
+        and not re.fullmatch(r"\d+(?:gb|tb|hz|kg|cm)", token)
+        and not re.fullmatch(r"\d+(?:th|nd|rd|st)", token)
+        and token not in {item.replace(" ", "") for item in cpu | gpu | gpu_memory | ram}
+        and token not in {"windows11", "windows", "win11", "ddr5", "ddr4"}
+    }
+    if model:
+        family_tokens -= model
+
+    display = set(re.findall(r"\d+(?:\.\d+)?\s*(?:inch|inches|cm)", text))
+    return {
+        "tokens": tokens,
+        "brand": {brand} if brand else set(),
+        "family": family_tokens,
+        "model": model,
+        "model_family": {model_family} if model_family else set(),
+        "model_variant": {model_variant} if model_variant else set(),
+        "cpu": cpu,
+        "gpu": gpu,
+        "gpu_memory": gpu_memory,
+        "ram": ram,
+        "storage": storage,
+        "os": os,
+        "display": display,
+        "color": _color_signals(value, text),
+        "truncated": bool(re.search(r"(?:\.\.\.|…)\s*$", raw)),
+    }
 
 
 def normalize_text(value: str | None) -> str:
@@ -209,98 +455,88 @@ def rank_flipkart_search_result(amazon_product, search_result) -> dict:
     Flipkart attributes yet. The weights mirror the existing matcher’s intent,
     with identifier/spec tokens receiving most of the score.
     """
-    amazon_signals = _search_match_signals(_search_match_text(amazon_product))
-    candidate_signals = _search_match_signals(search_result.title)
-    amazon_brand = _title_signal_tokens(amazon_product.brand)
-    amazon_signals["brand"] = amazon_brand
-    candidate_signals["brand"] = candidate_signals["tokens"] & amazon_brand
-
+    amazon_signals = _identity_signals(amazon_product)
+    candidate_signals = _identity_signals(search_result.title)
     matched = {}
     component_scores = {}
     conflicts = {}
-    applicable_weight = 0
+    source_product_type = classify_product_type(amazon_product)
+    candidate_product_type = classify_product_type(search_result.title)
+    source_is_phone = bool(
+        amazon_signals["model_family"]
+        or re.search(r"\b(?:smartphone|iphone|galaxy|pixel|phone)\b", _combined_search_text(amazon_product), re.I)
+    )
+    if source_is_phone and candidate_product_type == "accessory":
+        conflicts["product_type"] = ["accessory"]
     matched_weight = 0
-    for key in ("model", "cpu", "gpu", "gpu_memory", "brand", "os"):
+    applicable_weight = 0
+
+    comparable = ("brand", "family", "model", "cpu", "gpu", "gpu_memory", "ram", "storage", "os", "display", "color")
+    for key in comparable:
         source = amazon_signals[key]
+        candidate = candidate_signals[key]
         if not source:
             continue
-        matched[key] = source & candidate_signals[key]
-        # A missing model/SKU is not a contradiction. It cannot earn the
-        # model bonus, but it must not drown out matching hardware signals.
-        if (
-            not candidate_signals[key]
-            and (key == "model" or candidate_signals["truncated"])
+        # Search titles are often truncated or omit optional attributes. A
+        # missing candidate value is neutral for optional fields. Core
+        # hardware fields still contribute their weight, so a generic family
+        # title cannot outrank a candidate with matching hardware.
+        if not candidate:
+            matched[key] = set()
+            if key in {"cpu", "gpu", "gpu_memory", "ram", "storage"} and not candidate_signals["truncated"]:
+                applicable_weight += SEARCH_MATCH_WEIGHTS[key]
+            continue
+        applicable_weight += SEARCH_MATCH_WEIGHTS[key]
+        overlap = source & candidate
+        matched[key] = overlap
+        if overlap:
+            # One exact identity/spec value is enough to satisfy the signal;
+            # extra marketing/model tokens must not dilute it.
+            value = SEARCH_MATCH_WEIGHTS[key]
+            component_scores[key] = round(value, 2)
+            matched_weight += value
+        elif candidate and key in {"cpu", "gpu", "gpu_memory", "ram", "storage", "model"}:
+            conflicts[key] = sorted(candidate)
+
+    # Keep explicit contradictions visible even when a marketplace title is
+    # truncated; truncation makes missing data neutral, never an alternative
+    # value neutral.
+    for key in ("cpu", "gpu", "gpu_memory", "ram", "storage", "model"):
+        if amazon_signals[key] and candidate_signals[key] and not (
+            amazon_signals[key] & candidate_signals[key]
         ):
-            component_scores[key] = 0
-            continue
-        applicable_weight += SEARCH_MATCH_WEIGHTS[key]
-        if matched[key]:
-            component_scores[key] = round(
-                SEARCH_MATCH_WEIGHTS[key] * len(matched[key]) / len(source), 2
-            )
-            matched_weight += component_scores[key]
-        else:
-            component_scores[key] = 0
-            if candidate_signals[key]:
-                conflicts[key] = sorted(candidate_signals[key])
+            conflicts[key] = sorted(candidate_signals[key])
 
-    for key in ("ram", "storage"):
-        field = getattr(amazon_product, key, "")
-        source = {
-            capacity for capacity in _search_match_signals(field)["capacities"]
-        }
-        if not source:
-            continue
-        applicable_weight += SEARCH_MATCH_WEIGHTS[key]
-        matched[key] = source & candidate_signals["capacities"]
-        if matched[key]:
-            component_scores[key] = SEARCH_MATCH_WEIGHTS[key]
-            matched_weight += component_scores[key]
-        else:
-            component_scores[key] = 0
-            if candidate_signals["capacities"]:
-                conflicts[key] = sorted(candidate_signals["capacities"])
-
-    amazon_series = amazon_signals["generic"] - TITLE_STOPWORDS
-    candidate_series = candidate_signals["generic"] - TITLE_STOPWORDS
-    if amazon_series:
-        applicable_weight += SEARCH_MATCH_WEIGHTS["series"]
-        matched["series"] = amazon_series & candidate_series
-        if matched["series"]:
-            component_scores["series"] = round(
-                SEARCH_MATCH_WEIGHTS["series"]
-                * len(matched["series"])
-                / len(amazon_series),
-                2,
-            )
-            matched_weight += component_scores["series"]
-        else:
-            component_scores["series"] = 0
-
-    if amazon_signals["tokens"]:
-        applicable_weight += SEARCH_MATCH_WEIGHTS["os"]
-        title_overlap = amazon_signals["tokens"] & candidate_signals["tokens"]
+    source_tokens = amazon_signals["tokens"]
+    candidate_tokens = candidate_signals["tokens"]
+    if source_tokens:
+        applicable_weight += SEARCH_MATCH_WEIGHTS["title"]
+        title_overlap = source_tokens & candidate_tokens
         matched["title"] = title_overlap
-        if title_overlap:
-            component_scores["title"] = round(
-                SEARCH_MATCH_WEIGHTS["os"]
-                * len(title_overlap)
-                / len(amazon_signals["tokens"]),
-                2,
-            )
-            matched_weight += component_scores["title"]
-        else:
-            component_scores["title"] = 0
+        identity_overlap = any(
+            matched.get(key)
+            for key in ("model", "cpu", "gpu", "gpu_memory", "ram", "storage")
+        )
+        value = (
+            SEARCH_MATCH_WEIGHTS["title"]
+            if identity_overlap and title_overlap
+            else SEARCH_MATCH_WEIGHTS["title"] * len(title_overlap) / len(source_tokens)
+        )
+        component_scores["title"] = round(value, 2)
+        matched_weight += value
 
     score = round(100 * matched_weight / applicable_weight) if applicable_weight else 0
-
-    if score >= 90:
+    severe_conflicts = set(conflicts) & {"product_type", "model", "cpu", "gpu", "gpu_memory", "ram", "storage"}
+    core_matches = sum(bool(matched.get(key)) for key in ("cpu", "gpu", "ram", "storage"))
+    model_match = bool(matched.get("model"))
+    if severe_conflicts:
+        confidence = MatchConfidence.LOW
+        match_status = MatchStatus.REJECTED
+        score = min(score, 49)
+    elif (model_match or core_matches >= 3) and (core_matches >= 1 or matched.get("family")) and score >= 75:
         confidence = MatchConfidence.HIGH
         match_status = MatchStatus.MATCHED
-    elif score >= 80:
-        confidence = MatchConfidence.HIGH
-        match_status = MatchStatus.MATCHED
-    elif score >= 70:
+    elif score >= 65 and (core_matches >= 2 or matched.get("family")):
         confidence = MatchConfidence.MEDIUM
         match_status = MatchStatus.REVIEW
     else:
@@ -345,6 +581,12 @@ def rank_flipkart_search_result(amazon_product, search_result) -> dict:
                 if key not in {"tokens", "truncated"}
             },
             "flipkart_title_truncated": candidate_signals["truncated"],
+            "model_match": model_match,
+            "product_type": {
+                "amazon": source_product_type,
+                "flipkart": candidate_product_type,
+            },
+            "core_matches": core_matches,
             "applicable_weight": applicable_weight,
             "matched_weight": round(matched_weight, 2),
         },
@@ -464,6 +706,18 @@ def match_products(amazon_product, flipkart_product) -> dict:
         ),
     }
 
+    amazon_type = classify_product_type(amazon_product)
+    flipkart_type = classify_product_type(flipkart_product)
+    if flipkart_type == "accessory" and amazon_type != "accessory":
+        comparisons["product_type"] = {
+            "matched": False,
+            "available": True,
+            "score": 0,
+            "amazon": amazon_type,
+            "flipkart": flipkart_type,
+            "hard_mismatch": True,
+        }
+
     # Include resolution as supporting evidence when operating system is absent.
     for product, key in ((amazon_product, "amazon"), (flipkart_product, "flipkart")):
         resolution = normalize_text(getattr(product, "resolution", ""))
@@ -487,7 +741,7 @@ def match_products(amazon_product, flipkart_product) -> dict:
     applicable_weight = sum(
         WEIGHTS[key]
         for key, reason in comparisons.items()
-        if reason["available"]
+        if key in WEIGHTS and reason["available"]
     )
     matched_weight = sum(reason["score"] for reason in comparisons.values())
     score = round(matched_weight * 100 / applicable_weight) if applicable_weight else 0

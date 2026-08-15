@@ -35,18 +35,32 @@ def _normalise_capacity(value: str | None, kind: str) -> str | None:
     return f"{amount} {unit}"
 
 
+QUERY_NOISE = {
+    "and", "best", "black", "blue", "computer", "dts", "ever", "gamepass",
+    "gaming", "home", "latest", "laptop", "latest", "new", "notebook", "smartphone",
+    "office", "silver", "thin", "upgradeable", "with", "xbox", "core",
+    "hs", "hx", "quad", "hexa", "ai", "rtx", "gtx", "rx", "arc", "graphics", "g", "mp",
+    "camera", "battery", "long", "included", "pen", "smart", "s", "life",
+}
+KNOWN_BRANDS = {
+    "acer", "apple", "asus", " dell", "dell", "hp", "lenovo", "lg", "mi",
+    "msi", "oneplus", "realme", "samsung", "sony", "vivo", "xiaomi",
+}
+
+
+def _normalise_text(value: str | None) -> str:
+    return " ".join(str(value or "").replace("/", " ").split())
+
+
+def _compact_capacity(value: str | None) -> str | None:
+    normalised = _normalise_capacity(value, "storage")
+    if not normalised:
+        return None
+    return normalised.replace(" ", "")
+
+
 def _normalise_title(title: str) -> str:
-    title = " ".join((title or "").split())
-    title = re.sub(r"\([^)]*\)", "", title)
-    title = re.split(r"\s*[,:;|–—]\s*", title, maxsplit=1)[0]
-    title = re.split(r"\s+with\s+", title, maxsplit=1, flags=re.IGNORECASE)[0]
-    return re.sub(
-        r"(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>GB|TB)"
-        r"(?:\s*(?:RAM|ROM|STORAGE))?",
-        lambda match: f"{match.group('amount')} {match.group('unit').upper()}",
-        title,
-        flags=re.IGNORECASE,
-    ).strip()
+    return _normalise_text(title)
 
 
 def _append_unique(parts: list[str], value: str | None) -> None:
@@ -60,56 +74,141 @@ def _append_unique(parts: list[str], value: str | None) -> None:
         parts.append(value)
 
 
-def _query_parts(
-    amazon_product,
-) -> tuple[str, str | None, str | None, str | None, str | None]:
-    title = _normalise_title(amazon_product.product_title)
-    brand = " ".join((amazon_product.brand or "").split())
-    if brand and title.casefold().startswith(brand.casefold()):
-        identity = title[len(brand):].strip()
-    else:
-        identity = title
+def _model_identifiers(title: str) -> list[str]:
+    identifiers = []
+    phone_model = re.search(
+        r"\b(?:galaxy\s+)?(S\d{2}(?:\s+(?:Ultra|Edge|FE|Plus|Pro|Max|Mini|SE|Air|Fold|Flip))?)\b",
+        title,
+        re.I,
+    )
+    if phone_model:
+        identifiers.append(phone_model.group(1))
+    iphone = re.search(r"\biPhone\s+([0-9]+(?:\s+(?:Pro|Plus|Max))?)", title, re.I)
+    if iphone:
+        identifiers.append(iphone.group(1))
+    for token in re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?", title):
+        compact = token.replace("-", "")
+        if compact.casefold() in {"m365", "office24", "ddr5", "ddr4"}:
+            continue
+        if re.fullmatch(r"\d+-[A-Za-z]{2,}\d+[A-Za-z0-9]*", token):
+            token = token.split("-", 1)[1]
+            compact = token.replace("-", "")
+        if re.fullmatch(r"(?:[A-Za-z]{2,}\d+[A-Za-z0-9]*|\d+[A-Za-z]+\d+[A-Za-z0-9]*)", compact):
+            if compact.casefold() not in {"gb", "tb", "win11", "win10"}:
+                identifiers.append(token)
+    return list(dict.fromkeys(identifiers))
 
-    storage = _normalise_capacity(amazon_product.storage, "storage")
-    ram = _normalise_capacity(amazon_product.ram, "ram")
-    color = " ".join((amazon_product.color or "").split()) or None
-    if storage:
-        identity = re.sub(
-            r"\b\d+(?:\.\d+)?\s*(?:GB|TB)\s*"
-            r"(?:RAM|ROM|STORAGE)?\b",
-            " ",
-            identity,
-            flags=re.IGNORECASE,
-        )
-    if color:
-        identity = re.sub(
-            rf"\b{re.escape(color)}\b",
-            " ",
-            identity,
-            flags=re.IGNORECASE,
-        )
-    identity = " ".join(identity.split())
-    return brand, identity, storage, ram, color
+
+def _normalise_processor(value: str | None, title: str) -> str | None:
+    source = f"{value or ''} {title}"
+    match = re.search(r"ryzen\s*([3579])\s*(?:hexa\s*core\s*)?(\d{4,5}[A-Za-z]{0,3})", source, re.I)
+    if match:
+        return f"Ryzen {match.group(1)} {match.group(2).upper()}"
+    match = re.search(r"core\s*(?:i\s*)?([3579])\s*(?:\d+(?:st|nd|rd|th)\s+gen\s*)?(\d{3,5}[A-Za-z]{0,3})", source, re.I)
+    if match:
+        return f"Core {match.group(1)} {match.group(2).upper()}"
+    return None
+
+
+def _normalise_gpu(title: str) -> str | None:
+    match = re.search(r"\b(?:NVIDIA\s+)?(?:GeForce\s+)?(RTX|GTX|RX|ARC)\s*(\d{3,4})\b", title, re.I)
+    return f"{match.group(1).upper()} {match.group(2)}" if match else None
+
+
+def _family_tokens(title: str, brand: str, model: list[str]) -> list[str]:
+    clean = re.sub(r"\([^)]*\)", " ", title)
+    clean = re.sub(r"\d+(?:\.\d+)?\s*(?:GB|TB|RAM|SSD|HDD|KG|HZ|INCH|CM)\b", " ", clean, flags=re.I)
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9-]*", clean)
+    result = []
+    for token in tokens:
+        low = token.casefold()
+        if (low in QUERY_NOISE or low.startswith(("office", "gamepass"))
+                or low in {"phone", "phones", "tv", "television"}
+                or low in {brand.casefold()} or token in model
+                or any(low == part.casefold() for value in model for part in value.split())):
+            continue
+        if low in {"amd", "intel", "ryzen", "nvidia", "geforce", "windows", "home", "ssd", "ddr5", "ddr4"}:
+            continue
+        if re.fullmatch(r"\d+[A-Za-z]*", token):
+            continue
+        result.append(token)
+        if len(result) >= 2:
+            break
+    return result
+
+
+def _query_parts(amazon_product) -> dict[str, object]:
+    title = _normalise_title(amazon_product.product_title)
+    brand = _normalise_text(amazon_product.brand)
+    if not brand:
+        brand = next((token for token in title.split() if token.casefold() in KNOWN_BRANDS), "")
+    models = _model_identifiers(title)
+    family = _family_tokens(title, brand, models)
+    processor = _normalise_processor(amazon_product.processor, title)
+    gpu = _normalise_gpu(title)
+    ram = _compact_capacity(amazon_product.ram)
+    storage = _compact_capacity(amazon_product.storage)
+    if not ram:
+        ram_match = re.search(r"(\d+)\s*GB\s*(?:DDR\d+|RAM)", title, re.I)
+        ram = f"{ram_match.group(1)}GB" if ram_match else None
+    if not storage:
+        storage_match = re.search(r"(\d+)\s*GB\s*(?:SSD|NVME|HDD|ROM|STORAGE)", title, re.I)
+        storage = f"{storage_match.group(1)}GB" if storage_match else None
+    display = re.search(r"\b\d+(?:\.\d+)?\s*(?:inch|inches|cm)\b", title, re.I)
+    resolution = re.search(r"\b(?:4k|8k|1080p|1440p|full\s*hd|qhd|uhd)\b", title, re.I)
+    panel = next((value for value in ("QLED", "OLED", "AMOLED", "IPS") if re.search(value, title, re.I)), None)
+    category = "phone" if re.search(r"\b(?:iphone|phone|galaxy|pixel)\b", title, re.I) else ""
+    if re.search(r"\b(?:tv|television|qled|oled)\b", title, re.I):
+        category = "tv"
+    color = _normalise_text(amazon_product.color) or None
+    return {
+        "brand": brand,
+        "family": family,
+        "models": models,
+        "processor": processor,
+        "gpu": gpu,
+        "ram": ram,
+        "storage": storage,
+        "display": display.group(0) if display else None,
+        "resolution": resolution.group(0) if resolution else None,
+        "panel": panel,
+        "color": color if category == "phone" else None,
+        "category": category,
+    }
 
 
 def build_flipkart_search_queries(amazon_product) -> list[str]:
-    """Build at most three progressively broader product identity queries."""
-    brand, identity, storage, ram, color = _query_parts(amazon_product)
-    def make_query(include_color: bool, include_storage: bool) -> str:
-        parts = []
-        _append_unique(parts, brand)
-        _append_unique(parts, identity)
-        if include_storage:
-            _append_unique(parts, storage)
-            _append_unique(parts, ram)
-        if include_color:
-            _append_unique(parts, color)
-        return " ".join(parts).strip()
-
+    """Build bounded, product-aware Flipkart queries from stored attributes."""
+    parts = _query_parts(amazon_product)
+    brand = parts["brand"]
+    family = parts["family"]
+    models = parts["models"]
+    processor = parts["processor"]
+    gpu = parts["gpu"]
+    ram = parts["ram"]
+    storage = parts["storage"]
+    color = parts["color"]
+    category = parts["category"]
+    if category == "tv":
+        specific = [brand, *models, parts["display"], parts["resolution"], parts["panel"]]
+        processor_gpu = specific
+        family_specs = specific
+        model_only = [brand, *models]
+    elif re.search(r"\b(?:headphones?|headset|earbuds?|wh-)\b", amazon_product.product_title, re.I):
+        specific = [brand, *models]
+        processor_gpu = specific
+        family_specs = specific
+        model_only = specific
+    else:
+        specific = [brand, *family, *models, processor, gpu, ram, storage, color]
+        processor_gpu = [brand, *family, *models, processor, gpu]
+        family_specs = [brand, *family, processor, ram, storage]
+        model_only = [brand, *models]
     queries = [
-        make_query(include_color=True, include_storage=True),
-        make_query(include_color=False, include_storage=True),
-        make_query(include_color=False, include_storage=False),
+        " ".join(str(part) for part in specific if part),
+        " ".join(str(part) for part in processor_gpu if part),
+        " ".join(str(part) for part in family_specs if part),
+        " ".join(str(part) for part in model_only if part),
     ]
     queries = list(dict.fromkeys(query for query in queries if query))
     if not queries:

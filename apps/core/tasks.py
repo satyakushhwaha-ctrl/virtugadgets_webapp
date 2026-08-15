@@ -81,7 +81,7 @@ def amazon_search_task(self, search_keyword_id, job_id=None):
 
 @shared_task(bind=True, name="apps.core.tasks.amazon_product_extraction_task")
 def amazon_product_extraction_task(self, search_result_id, job_id=None):
-    from apps.importer.models import AmazonSearchResult, ImporterJobMarketplace, ImporterJobType
+    from apps.importer.models import AmazonProduct, AmazonSearchResult, ImporterJobMarketplace, ImporterJobType
     from apps.importer.services.jobs import mark_job_completed, mark_job_skipped, update_job_progress
     from apps.importer.services.amazon_product import process_amazon_search_result
 
@@ -93,6 +93,9 @@ def amazon_product_extraction_task(self, search_result_id, job_id=None):
     _start_job(job)
     try:
         processed = process_amazon_search_result(result)
+        product = AmazonProduct.objects.get(asin=result.asin)
+        job.amazon_product = product
+        job.save(update_fields=["amazon_product", "updated_at"])
         update_job_progress(job, processed_items=1, success_count=int(bool(processed)), skipped_count=int(not processed))
         if processed:
             mark_job_completed(job, f"Amazon product {result.asin} extracted successfully.")
@@ -100,6 +103,10 @@ def amazon_product_extraction_task(self, search_result_id, job_id=None):
             mark_job_skipped(job, f"Amazon product {result.asin} was skipped.")
         return {"status": "completed" if processed else "skipped", "id": str(result.pk), "job_id": str(job.pk)}
     except Exception as exc:
+        product = AmazonProduct.objects.filter(asin=result.asin).first()
+        if product:
+            job.amazon_product = product
+            job.save(update_fields=["amazon_product", "updated_at"])
         _handle_failure(self, job, exc, f"Amazon product extraction for {result.asin}")
 
 
@@ -130,7 +137,7 @@ def flipkart_search_task(self, search_keyword_id, job_id=None):
 
 @shared_task(bind=True, name="apps.core.tasks.flipkart_product_extraction_task")
 def flipkart_product_extraction_task(self, search_result_id, job_id=None):
-    from apps.importer.models import FlipkartSearchResult, ImporterJobMarketplace, ImporterJobType
+    from apps.importer.models import FlipkartProduct, FlipkartSearchResult, ImporterJobMarketplace, ImporterJobType
     from apps.importer.services.jobs import mark_job_completed, mark_job_skipped, update_job_progress
     from apps.importer.services.flipkart_product import process_flipkart_search_result
 
@@ -142,6 +149,9 @@ def flipkart_product_extraction_task(self, search_result_id, job_id=None):
     _start_job(job)
     try:
         processed = process_flipkart_search_result(result)
+        product = FlipkartProduct.objects.get(pid=result.pid)
+        job.flipkart_product = product
+        job.save(update_fields=["flipkart_product", "updated_at"])
         update_job_progress(job, processed_items=1, success_count=int(bool(processed)), skipped_count=int(not processed))
         if processed:
             mark_job_completed(job, f"Flipkart PID {result.pid} extracted successfully.")
@@ -149,6 +159,10 @@ def flipkart_product_extraction_task(self, search_result_id, job_id=None):
             mark_job_skipped(job, f"Flipkart PID {result.pid} was skipped.")
         return {"status": "completed" if processed else "skipped", "id": str(result.pk), "pid": result.pid, "job_id": str(job.pk)}
     except Exception as exc:
+        product = FlipkartProduct.objects.filter(pid=result.pid).first()
+        if product:
+            job.flipkart_product = product
+            job.save(update_fields=["flipkart_product", "updated_at"])
         _handle_failure(self, job, exc, f"Flipkart product extraction for PID {result.pid}")
 
 
@@ -216,7 +230,8 @@ def extract_best_matched_flipkart_product(self, amazon_product_id, job_id=None):
             amazon_product.status = previous_status
             amazon_product.error_message = ""
             amazon_product.save(update_fields=["status", "error_message", "updated_at"])
-        return {"status": result.get("status"), "reason": result.get("reason", ""), "amazon_product_id": str(amazon_product.pk), "asin": amazon_product.asin, "job_id": str(job.pk), "pid": result.get("flipkart_product").pid if result.get("flipkart_product") else ""}
+        task_status = "completed" if result.get("status") == "extracted" else result.get("status")
+        return {"status": task_status, "reason": result.get("reason", ""), "amazon_product_id": str(amazon_product.pk), "asin": amazon_product.asin, "job_id": str(job.pk), "pid": result.get("flipkart_product").pid if result.get("flipkart_product") else ""}
     except Exception as exc:
         amazon_product.status = ImportStatus.FAILED
         amazon_product.error_message = str(exc) or exc.__class__.__name__

@@ -7,6 +7,16 @@ from django.utils import timezone
 from ..models import ImporterJob, ImporterJobStatus
 
 
+def concise_error_message(exc_or_message, *, limit=500):
+    """Return a useful one-line reason while leaving full traceback logging to Celery."""
+    if isinstance(exc_or_message, Exception):
+        message = str(exc_or_message) or exc_or_message.__class__.__name__
+    else:
+        message = str(exc_or_message)
+    message = message.split("Call log:", 1)[0].strip()
+    return message[:limit] or "Unknown extraction failure."
+
+
 def create_job(*, title, job_type, marketplace="", total_items=0, created_by=None,
                amazon_product=None, flipkart_product=None, import_batch=None,
                product_match=None, metadata=None):
@@ -104,10 +114,7 @@ def mark_job_skipped(job, result_message=""):
 
 
 def mark_job_failed(job, exc_or_message):
-    if isinstance(exc_or_message, Exception):
-        message = str(exc_or_message) or exc_or_message.__class__.__name__
-    else:
-        message = str(exc_or_message)
+    message = concise_error_message(exc_or_message)
     return _finish(job, ImporterJobStatus.FAILED, error_message=message)
 
 

@@ -275,6 +275,9 @@ class AmazonProduct(models.Model):
     url = models.URLField(max_length=1000)
     availability = models.CharField(max_length=255, blank=True)
     images = models.JSONField(default=list, blank=True)
+    description = models.TextField(blank=True)
+    highlights = models.JSONField(default=list, blank=True)
+    specifications = models.JSONField(default=dict, blank=True)
 
     mrp_inr = models.PositiveIntegerField(null=True, blank=True)
     current_selling_price_inr = models.PositiveIntegerField(null=True, blank=True)

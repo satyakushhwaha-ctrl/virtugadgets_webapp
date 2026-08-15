@@ -265,7 +265,14 @@ def build_product_detail_context(
     )
     if best_offer:
         best_offer["is_best"] = True
-    description = product.short_description or product.description
+    amazon_source = next(iter(getattr(product, "published_amazon_products", [])), None)
+    amazon_description = getattr(amazon_source, "description", "") if amazon_source else ""
+    highlights = _clean_detail_values(
+        getattr(amazon_source, "highlights", []),
+        list_value=True,
+    ) if amazon_source else []
+    amazon_specifications = _build_amazon_specifications(amazon_source) if amazon_source else []
+    description = amazon_description or product.short_description or product.description
     seo_description = (description or f"Compare prices for {product.title}.")[:160]
 
     return {
@@ -280,7 +287,71 @@ def build_product_detail_context(
             image_url=image_url,
             canonical_url=canonical_url,
         ),
+        "amazon_details": {
+            "source": amazon_source,
+            "description": description,
+            "highlights": highlights,
+            "specifications": amazon_specifications,
+        },
     }
+
+
+def _clean_detail_values(value, *, list_value=False):
+    """Return display-safe extracted values, omitting null/empty structures."""
+    if list_value:
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [str(item).strip() for item in value if str(item).strip() and str(item).strip() not in {"None", "null", "{}", "[]"}]
+    if value is None or value == "":
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        if not value:
+            return ""
+        value = ", ".join(f"{key}: {item}" for key, item in value.items()) if isinstance(value, dict) else ", ".join(map(str, value))
+    result = str(value).strip()
+    return "" if result.casefold() in {"none", "null", "{}", "[]"} else result
+
+
+def _build_amazon_specifications(amazon_product) -> list[dict[str, str]]:
+    if amazon_product is None:
+        return []
+    fields = (
+        ("Brand", "brand"),
+        ("Model", "product_title"),
+        ("RAM", "ram"),
+        ("Storage", "storage"),
+        ("Processor", "processor"),
+        ("Operating system", "operating_system"),
+        ("Display size", "display_size"),
+        ("Resolution", "resolution"),
+        ("Color", "color"),
+        ("Weight", "weight_kg"),
+        ("Software", "software"),
+        ("Warranty", "warranty"),
+        ("Seller", "primary_seller"),
+        ("Availability", "availability"),
+        ("MRP", "mrp_inr"),
+        ("Selling price", "current_selling_price_inr"),
+        ("Minimum price", "selling_price_min_inr"),
+        ("Maximum price", "selling_price_max_inr"),
+    )
+    specifications = []
+    seen = set()
+    for label, field in fields:
+        value = _clean_detail_values(getattr(amazon_product, field, ""))
+        if field == "weight_kg" and value:
+            value = f"{value} kg"
+        elif field in {"mrp_inr", "current_selling_price_inr", "selling_price_min_inr", "selling_price_max_inr"} and value:
+            value = f"₹{value}"
+        if value:
+            specifications.append({"label": label, "value": value})
+            seen.add(label.casefold())
+    for key, value in (getattr(amazon_product, "specifications", {}) or {}).items():
+        label = _clean_detail_values(key)
+        display_value = _clean_detail_values(value)
+        if label and display_value and label.casefold() not in seen:
+            specifications.append({"label": label, "value": display_value})
+    return specifications
 
 
 def build_offer(
