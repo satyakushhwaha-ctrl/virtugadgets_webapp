@@ -23,6 +23,11 @@ env.read_env(BASE_DIR / ".env")
 # fallback keeps local development convenient without embedding credentials.
 REDIS_URL = env("REDIS_URL", default="redis://127.0.0.1:6379/0")
 
+# Amazon search remains Playwright-first; ScrapingBee is only used as the
+# configured fallback when direct Amazon access is blocked or unavailable.
+AMAZON_SEARCH_PROVIDER = env("AMAZON_SEARCH_PROVIDER", default="auto").lower()
+SCRAPINGBEE_API_KEY = env("SCRAPINGBEE_API_KEY", default="")
+
 
 # Security
 SECRET_KEY = env("SECRET_KEY")

@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote_plus, urljoin, urlparse
 
 from django.core.exceptions import ValidationError
+import requests
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ PRODUCT_SELECTORS = (
     "div.s-result-item[data-asin]",
     "[data-asin]",
 )
+ACCESS_FAILURE_STATUSES = {403, 429, 503}
+SCRAPINGBEE_URL = "https://app.scrapingbee.com/api/v1/"
 BLOCK_MARKERS = (
     "captcha",
     "robot check",
@@ -262,6 +265,120 @@ def _extract_asin(asin: str | None, href: str | None) -> str | None:
     return None
 
 
+def _parse_search_page(page, *, scroll: bool = True) -> list[dict]:
+    """Parse Amazon search markup shared by all search providers."""
+    if scroll:
+        for _ in range(5):
+            page.mouse.wheel(0, 1500)
+            page.wait_for_timeout(800)
+
+    products = None
+    for selector in PRODUCT_SELECTORS:
+        candidate_products = page.locator(selector)
+        if candidate_products.count():
+            products = candidate_products
+            break
+    if products is None:
+        return []
+
+    rows = []
+    for index in range(products.count()):
+        item = products.nth(index)
+        item_asin = item.get_attribute("data-asin")
+        link = item.locator("h2 a, a[href*='/dp/'], a[href*='/gp/product/']")
+        href = link.first.get_attribute("href") if link.count() else None
+        title = item.locator("h2 span, h2, a[href*='/dp/'], a[href*='/gp/product/']")
+        rows.append(
+            {
+                "asin": item_asin,
+                "title": title.first.inner_text().strip() if title.count() else "",
+                "product_url": href,
+                "position": index + 1,
+                "sponsored": "sponsored" in item.inner_text().lower(),
+            }
+        )
+    return rows
+
+
+def _scrapingbee_api_key() -> str:
+    # Read the environment at call time so worker processes and tests can
+    # change configuration without importing secrets into logs or code.
+    return os.getenv("SCRAPINGBEE_API_KEY", "").strip()
+
+
+def _scrape_search_results_scrapingbee(keyword: str) -> list[dict]:
+    """Fetch Amazon search HTML through ScrapingBee and use the same parser."""
+    from playwright.sync_api import sync_playwright
+    from .playwright import is_headless
+
+    api_key = _scrapingbee_api_key()
+    if not api_key:
+        raise AmazonSearchScrapingError(
+            "Amazon search fallback is unavailable: SCRAPINGBEE_API_KEY is not configured."
+        )
+
+    requested_url = SEARCH_URL.format(keyword=quote_plus(keyword))
+    logger.info("Amazon search fallback starting: provider=scrapingbee url=%s", requested_url)
+    try:
+        response = requests.get(
+            SCRAPINGBEE_URL,
+            params={"api_key": api_key, "url": requested_url},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise AmazonSearchScrapingError(
+            f"ScrapingBee Amazon search request failed: {exc}"
+        ) from exc
+
+    content_type = response.headers.get("content-type", "")
+    logger.info(
+        "ScrapingBee Amazon search response: status=%s content_type=%s",
+        response.status_code,
+        content_type or "<unknown>",
+    )
+    if response.status_code != 200:
+        raise AmazonSearchScrapingError(
+            f"ScrapingBee Amazon search returned HTTP {response.status_code}."
+        )
+    if "html" not in content_type.lower() and "xml" not in content_type.lower():
+        raise AmazonSearchScrapingError(
+            f"ScrapingBee Amazon search returned non-HTML content ({content_type or '<unknown>'})."
+        )
+
+    html = response.text
+    if not html or _blocking_reason({
+        "url": requested_url,
+        "title": "",
+        "body_text": html[:4000],
+        "html_snippet": html[:5000],
+    }):
+        raise AmazonBlockedPageError(
+            "ScrapingBee returned an Amazon blocked/automated-access page."
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=is_headless(),
+            args=["--disable-dev-shm-usage", "--no-sandbox", "--disable-setuid-sandbox"],
+        )
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
+        try:
+            page.set_content(html, wait_until="domcontentloaded", timeout=30000)
+            rows = _parse_search_page(page, scroll=False)
+        finally:
+            page.close()
+            context.close()
+            browser.close()
+
+    if not rows:
+        raise AmazonSearchSelectorError(
+            "ScrapingBee returned valid HTML but Amazon search selectors were not found."
+        )
+    logger.info("Amazon search parser: provider=scrapingbee results=%s", len(rows))
+    return rows
+
+
 def _scrape_search_results(keyword: str) -> list[dict]:
     """Scrape Amazon using the project's existing Playwright behaviour."""
     # Keep Playwright lazy so Django checks and unit tests do not require a
@@ -321,6 +438,10 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                         timeout=90000,
                     )
                     response_info = _response_diagnostics(response)
+                    if response_info["status"] in ACCESS_FAILURE_STATUSES:
+                        raise AmazonNavigationError(
+                            f"Amazon search returned HTTP {response_info['status']} for {requested_url}"
+                        )
                     current_url = page.url
                     if _is_chrome_error_url(current_url):
                         raise AmazonNavigationError(
@@ -422,39 +543,10 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                 if attempt < navigation_attempts:
                     time.sleep(attempt)
 
-            for _ in range(5):
-                page.mouse.wheel(0, 1500)
-                page.wait_for_timeout(800)
-
-            products = None
-            for selector in PRODUCT_SELECTORS:
-                candidate_products = page.locator(selector)
-                if candidate_products.count():
-                    products = candidate_products
-                    break
-            if products is None:
+            rows = _parse_search_page(page)
+            if not rows:
                 diagnostics = _page_diagnostics(page)
                 _raise_unexpected_page(page, keyword, diagnostics)
-            rows = []
-            for index in range(products.count()):
-                item = products.nth(index)
-                item_asin = item.get_attribute("data-asin")
-                link = item.locator("h2 a, a[href*='/dp/'], a[href*='/gp/product/']")
-                href = link.first.get_attribute("href") if link.count() else None
-                title = item.locator("h2 span, h2, a[href*='/dp/'], a[href*='/gp/product/']")
-                rows.append(
-                    {
-                        "asin": item_asin,
-                        "title": (
-                            title.first.inner_text().strip()
-                            if title.count()
-                            else ""
-                        ),
-                        "product_url": href,
-                        "position": index + 1,
-                        "sponsored": "sponsored" in item.inner_text().lower(),
-                    }
-                )
             return rows
         finally:
             if page:
@@ -474,7 +566,30 @@ def search_amazon(keyword: str) -> list[dict]:
         raise ValidationError("Amazon search keyword cannot be empty.")
 
     normalised_keyword = keyword.strip()
-    results = _scrape_search_results(normalised_keyword)
+    provider = os.getenv("AMAZON_SEARCH_PROVIDER", "auto").strip().lower() or "auto"
+    if provider not in {"auto", "playwright", "scrapingbee"}:
+        raise ValidationError(
+            "AMAZON_SEARCH_PROVIDER must be auto, playwright, or scrapingbee."
+        )
+
+    if provider == "scrapingbee":
+        results = _scrape_search_results_scrapingbee(normalised_keyword)
+        used_provider = "scrapingbee"
+    else:
+        try:
+            results = _scrape_search_results(normalised_keyword)
+            used_provider = "playwright"
+        except (AmazonNavigationError, AmazonBlockedPageError) as exc:
+            if provider == "playwright":
+                raise
+            logger.warning(
+                "Amazon Playwright search failed; falling back to ScrapingBee: reason=%s",
+                str(exc)[:500],
+            )
+            results = _scrape_search_results_scrapingbee(normalised_keyword)
+            used_provider = "scrapingbee"
+
+    logger.info("Amazon search completed: provider=%s results=%s", used_provider, len(results))
     normalised = []
     seen_asins = set()
 

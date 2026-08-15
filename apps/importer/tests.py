@@ -52,6 +52,7 @@ from .services.amazon_search import (
     AmazonSearchScrapingError,
     AmazonSearchSelectorError,
     _blocking_reason,
+    _scrape_search_results_scrapingbee,
     _scrape_search_results,
 )
 from .services.flipkart_product import (
@@ -1462,6 +1463,83 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
         self.assertIn("chrome_error_url: True", str(raised.exception))
         self.assertEqual(browser.new_context.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
+
+    @staticmethod
+    def _provider_rows():
+        return [{
+            "asin": "B000000001",
+            "title": "Example phone",
+            "product_url": "/dp/B000000001",
+            "position": 1,
+            "sponsored": False,
+        }]
+
+    @patch("apps.importer.services.amazon_search._scrape_search_results_scrapingbee")
+    @patch("apps.importer.services.amazon_search._scrape_search_results")
+    def test_playwright_success_does_not_call_scrapingbee(self, direct, fallback):
+        direct.return_value = self._provider_rows()
+
+        search_amazon("iphone 16")
+
+        direct.assert_called_once_with("iphone 16")
+        fallback.assert_not_called()
+
+    @patch("apps.importer.services.amazon_search._scrape_search_results_scrapingbee")
+    @patch("apps.importer.services.amazon_search._scrape_search_results")
+    def test_access_failure_falls_back_to_scrapingbee(self, direct, fallback):
+        direct.side_effect = AmazonNavigationError("HTTP 503")
+        fallback.return_value = self._provider_rows()
+
+        with patch.dict(os.environ, {"AMAZON_SEARCH_PROVIDER": "auto"}):
+            results = search_amazon("iphone 16")
+
+        self.assertEqual(results[0]["asin"], "B000000001")
+        fallback.assert_called_once_with("iphone 16")
+
+    @patch("apps.importer.services.amazon_search._scrape_search_results_scrapingbee")
+    @patch("apps.importer.services.amazon_search._scrape_search_results")
+    def test_selector_failure_does_not_fall_back(self, direct, fallback):
+        direct.side_effect = AmazonSearchSelectorError("selector failure")
+
+        with patch.dict(os.environ, {"AMAZON_SEARCH_PROVIDER": "auto"}):
+            with self.assertRaises(AmazonSearchSelectorError):
+                search_amazon("iphone 16")
+
+        fallback.assert_not_called()
+
+    @patch("playwright.sync_api.sync_playwright")
+    @patch("apps.importer.services.amazon_search.requests.get")
+    def test_scrapingbee_200_uses_common_search_parser(self, get, sync):
+        response = MagicMock(status_code=200, text="<html>Amazon results</html>")
+        response.headers = {"content-type": "text/html; charset=utf-8"}
+        get.return_value = response
+        page = self._page("Example phone", products=True)
+        manager, browser, context = self._runtime(page)
+        sync.return_value = manager
+
+        with patch.dict(os.environ, {"SCRAPINGBEE_API_KEY": "test-key"}):
+            rows = _scrape_search_results_scrapingbee("iphone 16")
+
+        self.assertEqual(rows[0]["asin"], "B000000001")
+        get.assert_called_once()
+        self.assertEqual(get.call_args.kwargs["params"]["api_key"], "test-key")
+
+    @patch("apps.importer.services.amazon_search._scrape_search_results_scrapingbee")
+    @patch("apps.importer.services.amazon_search._scrape_search_results")
+    def test_provider_modes_are_respected(self, direct, fallback):
+        direct.return_value = self._provider_rows()
+        fallback.return_value = self._provider_rows()
+
+        with patch.dict(os.environ, {"AMAZON_SEARCH_PROVIDER": "playwright"}):
+            search_amazon("iphone 16")
+        direct.assert_called_once()
+        fallback.assert_not_called()
+
+        direct.reset_mock()
+        with patch.dict(os.environ, {"AMAZON_SEARCH_PROVIDER": "scrapingbee"}):
+            search_amazon("iphone 16")
+        direct.assert_not_called()
+        fallback.assert_called_once_with("iphone 16")
 
 
 class ImporterAdminTests(TestCase):
