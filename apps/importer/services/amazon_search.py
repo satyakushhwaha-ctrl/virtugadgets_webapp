@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import quote_plus, urljoin, urlparse
@@ -39,7 +40,19 @@ BLOCK_MARKERS = (
 
 
 class AmazonSearchScrapingError(RuntimeError):
-    """Raised when Amazon returns a block/interstitial/unexpected page."""
+    """Base class for Amazon search scraping failures."""
+
+
+class AmazonNavigationError(AmazonSearchScrapingError):
+    """Raised when Playwright did not receive a normal Amazon document."""
+
+
+class AmazonSearchSelectorError(AmazonSearchScrapingError):
+    """Raised when a normal Amazon document has no expected result selectors."""
+
+
+class AmazonBlockedPageError(AmazonSearchScrapingError):
+    """Raised when Amazon returns an anti-bot or interstitial page."""
 
 
 def _page_diagnostics(page) -> dict[str, str]:
@@ -67,6 +80,78 @@ def _page_diagnostics(page) -> dict[str, str]:
         "html_snippet": html[:5000],
         "html": html,
     }
+
+
+def _response_diagnostics(response) -> dict[str, object]:
+    if response is None:
+        return {"status": None, "content_type": "", "headers": {}}
+    try:
+        status = response.status
+    except Exception:
+        status = None
+    try:
+        headers = response.headers
+        headers = headers() if callable(headers) else headers
+        headers = dict(headers or {})
+    except Exception:
+        headers = {}
+    content_type = headers.get("content-type", "")
+    return {
+        "status": status if isinstance(status, int) else None,
+        "content_type": content_type,
+        "headers": headers,
+    }
+
+
+def _is_chrome_error_url(url: str) -> bool:
+    return (url or "").lower().startswith("chrome-error://")
+
+
+def _raise_navigation_error(
+    page,
+    keyword: str,
+    requested_url: str,
+    *,
+    response=None,
+    cause=None,
+):
+    diagnostics = _page_diagnostics(page)
+    response_info = _response_diagnostics(response)
+    screenshot_path, html_path = _save_page_diagnostics(page, keyword)
+    message = (
+        "Amazon search navigation failed. "
+        f"Requested URL: {requested_url}; final URL: {diagnostics['url']}; "
+        f"status: {response_info['status']}; content_type: {response_info['content_type'] or '<unknown>'}; "
+        f"chrome_error_url: {_is_chrome_error_url(diagnostics['url'])}; "
+        f"title: {diagnostics['title']}; diagnostics: screenshot={screenshot_path}, html={html_path}"
+    )
+    logger.warning(
+        "Amazon search navigation diagnostic: %s response_headers=%s",
+        message,
+        response_info["headers"],
+        exc_info=bool(cause),
+    )
+    raise AmazonNavigationError(message) from cause
+
+
+def _log_navigation_diagnostics(page, keyword: str, requested_url: str, *, response=None, cause=None):
+    """Persist diagnostics for a retryable navigation failure."""
+    diagnostics = _page_diagnostics(page)
+    response_info = _response_diagnostics(response)
+    screenshot_path, html_path = _save_page_diagnostics(page, keyword)
+    logger.warning(
+        "Amazon search navigation attempt failed: requested_url=%s final_url=%s status=%s content_type=%s chrome_error_url=%s title=%s diagnostics: screenshot=%s, html=%s response_headers=%s",
+        requested_url,
+        diagnostics["url"],
+        response_info["status"],
+        response_info["content_type"] or "<unknown>",
+        _is_chrome_error_url(diagnostics["url"]),
+        diagnostics["title"],
+        screenshot_path,
+        html_path,
+        response_info["headers"],
+        exc_info=bool(cause),
+    )
 
 
 def _blocking_reason(diagnostics: dict[str, str]) -> str | None:
@@ -102,8 +187,10 @@ def _raise_unexpected_page(page, keyword: str, diagnostics: dict[str, str], caus
     screenshot_path, html_path = _save_page_diagnostics(page, keyword)
     if block_reason:
         reason = f"Amazon returned a blocking/interstitial page ({block_reason})."
+        error_type = AmazonBlockedPageError
     else:
         reason = "Amazon search product selectors were not found; page layout may have changed or returned no results."
+        error_type = AmazonSearchSelectorError
     message = (
         f"{reason} URL: {diagnostics['url']}; title: {diagnostics['title']}; "
         f"diagnostics: screenshot={screenshot_path}, html={html_path}"
@@ -112,7 +199,7 @@ def _raise_unexpected_page(page, keyword: str, diagnostics: dict[str, str], caus
         logger.warning("Amazon search diagnostic failure: %s", message, exc_info=True)
     else:
         logger.warning("Amazon search diagnostic failure: %s", message)
-    raise AmazonSearchScrapingError(message) from cause
+    raise error_type(message) from cause
 
 
 def _normalise_amazon_url(href: str | None, asin: str | None) -> str | None:
@@ -146,6 +233,7 @@ def _scrape_search_results(keyword: str) -> list[dict]:
     # Keep Playwright lazy so Django checks and unit tests do not require a
     # browser installation unless a real search is actually requested.
     from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from .playwright import is_headless
 
@@ -153,6 +241,8 @@ def _scrape_search_results(keyword: str) -> list[dict]:
         browser = None
         context = None
         page = None
+        requested_url = SEARCH_URL.format(keyword=quote_plus(keyword))
+        navigation_attempts = 3
         try:
             browser = playwright.chromium.launch(
                 headless=is_headless(),
@@ -161,46 +251,135 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
+                    "--disable-setuid-sandbox",
                     "--disable-infobars",
                 ],
             )
-            context = browser.new_context(
-                viewport={"width": 1440, "height": 900},
-                locale="en-IN",
-                timezone_id="Asia/Kolkata",
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/138.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
-            page.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', "
-                "{get: () => undefined})"
-            )
-            page.goto(
-                SEARCH_URL.format(keyword=quote_plus(keyword)),
-                wait_until="commit",
-                timeout=90000,
-            )
-            page.wait_for_timeout(6000)
-            diagnostics = _page_diagnostics(page)
-            logger.info(
-                "Amazon search page before selector wait: url=%s title=%s body=%s html=%s",
-                diagnostics["url"],
-                diagnostics["title"],
-                diagnostics["body_text"],
-                diagnostics["html_snippet"],
-            )
-            if _blocking_reason(diagnostics):
-                _raise_unexpected_page(page, keyword, diagnostics)
-            combined_selector = ", ".join(PRODUCT_SELECTORS)
-            try:
-                page.wait_for_selector(combined_selector, timeout=30000)
-            except PlaywrightTimeoutError as exc:
-                diagnostics = _page_diagnostics(page)
-                _raise_unexpected_page(page, keyword, diagnostics, cause=exc)
+            for attempt in range(1, navigation_attempts + 1):
+                context = None
+                page = None
+                response = None
+                navigation_ready = False
+                try:
+                    context = browser.new_context(
+                        viewport={"width": 1440, "height": 900},
+                        locale="en-IN",
+                        timezone_id="Asia/Kolkata",
+                        user_agent=(
+                            "Mozilla/5.0 (X11; Linux x86_64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/138.0.0.0 Safari/537.36"
+                        ),
+                        extra_http_headers={
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                            "Accept-Language": "en-IN,en;q=0.9",
+                            "Upgrade-Insecure-Requests": "1",
+                        },
+                    )
+                    page = context.new_page()
+                    page.add_init_script(
+                        "Object.defineProperty(navigator, 'webdriver', "
+                        "{get: () => undefined})"
+                    )
+                    response = page.goto(
+                        requested_url,
+                        wait_until="commit",
+                        timeout=90000,
+                    )
+                    response_info = _response_diagnostics(response)
+                    current_url = page.url
+                    if _is_chrome_error_url(current_url):
+                        raise AmazonNavigationError(
+                            f"Amazon returned chrome-error:// for {requested_url}"
+                        )
+                    content_type = str(response_info["content_type"] or "").lower()
+                    if content_type and not any(
+                        value in content_type for value in ("text/html", "application/xhtml+xml")
+                    ):
+                        raise AmazonNavigationError(
+                            f"Amazon returned non-HTML content ({content_type}) for {requested_url}"
+                        )
+                    page.wait_for_timeout(6000)
+                    diagnostics = _page_diagnostics(page)
+                    logger.info(
+                        "Amazon search page before selector wait: requested_url=%s url=%s status=%s content_type=%s title=%s body=%s html=%s",
+                        requested_url,
+                        diagnostics["url"],
+                        response_info["status"],
+                        response_info["content_type"],
+                        diagnostics["title"],
+                        diagnostics["body_text"],
+                        diagnostics["html_snippet"],
+                    )
+                    if _is_chrome_error_url(diagnostics["url"]):
+                        raise AmazonNavigationError(
+                            f"Amazon returned chrome-error:// for {requested_url}"
+                        )
+                    if _blocking_reason(diagnostics):
+                        _raise_unexpected_page(page, keyword, diagnostics)
+                    combined_selector = ", ".join(PRODUCT_SELECTORS)
+                    try:
+                        page.wait_for_selector(combined_selector, timeout=30000)
+                    except PlaywrightTimeoutError as exc:
+                        diagnostics = _page_diagnostics(page)
+                        _raise_unexpected_page(page, keyword, diagnostics, cause=exc)
+                    navigation_ready = True
+                    break
+                except PlaywrightTimeoutError as exc:
+                    _log_navigation_diagnostics(
+                        page, keyword, requested_url, response=response, cause=exc
+                    )
+                    if attempt == navigation_attempts:
+                        _raise_navigation_error(
+                            page, keyword, requested_url, response=response, cause=exc
+                        )
+                    logger.warning(
+                        "Amazon search navigation timeout on attempt %s/%s: requested_url=%s",
+                        attempt,
+                        navigation_attempts,
+                        requested_url,
+                        exc_info=True,
+                    )
+                except PlaywrightError as exc:
+                    if "Download is starting" not in str(exc):
+                        raise
+                    _log_navigation_diagnostics(
+                        page, keyword, requested_url, response=response, cause=exc
+                    )
+                    logger.warning(
+                        "Amazon search navigation returned a download on attempt %s/%s: requested_url=%s",
+                        attempt,
+                        navigation_attempts,
+                        requested_url,
+                        exc_info=True,
+                    )
+                    if attempt == navigation_attempts:
+                        _raise_navigation_error(
+                            page, keyword, requested_url, response=response, cause=exc
+                        )
+                except AmazonNavigationError as exc:
+                    _log_navigation_diagnostics(
+                        page, keyword, requested_url, response=response, cause=exc
+                    )
+                    if attempt == navigation_attempts:
+                        _raise_navigation_error(
+                            page, keyword, requested_url, response=response, cause=exc
+                        )
+                finally:
+                    if page and not navigation_ready:
+                        try:
+                            page.close()
+                        except Exception:
+                            logger.debug("Could not close Amazon search page", exc_info=True)
+                        page = None
+                    if context and not navigation_ready:
+                        try:
+                            context.close()
+                        except Exception:
+                            logger.debug("Could not close Amazon search context", exc_info=True)
+                        context = None
+                if attempt < navigation_attempts:
+                    time.sleep(attempt)
 
             for _ in range(5):
                 page.mouse.wheel(0, 1500)

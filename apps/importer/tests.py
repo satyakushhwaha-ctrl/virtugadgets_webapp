@@ -46,7 +46,10 @@ from .services.flipkart_search_results import run_flipkart_search_for_keyword
 from .services.amazon_search import search_amazon
 from .services.amazon_search import (
     PRODUCT_SELECTORS,
+    AmazonBlockedPageError,
+    AmazonNavigationError,
     AmazonSearchScrapingError,
+    AmazonSearchSelectorError,
     _blocking_reason,
     _scrape_search_results,
 )
@@ -1176,6 +1179,7 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
     def _runtime(self, page):
         runtime = MagicMock()
         browser = MagicMock()
+        browser.chromium = runtime.chromium
         context = MagicMock()
         context.new_page.return_value = page
         browser.new_context.return_value = context
@@ -1184,6 +1188,21 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
         manager.__enter__.return_value = runtime
         manager.__exit__.return_value = False
         return manager, browser, context
+
+    def _runtime_for_pages(self, pages):
+        runtime = MagicMock()
+        browser = MagicMock()
+        contexts = []
+        for page in pages:
+            context = MagicMock()
+            context.new_page.return_value = page
+            contexts.append(context)
+        browser.new_context.side_effect = contexts
+        runtime.chromium.launch.return_value = browser
+        manager = MagicMock()
+        manager.__enter__.return_value = runtime
+        manager.__exit__.return_value = False
+        return manager, browser, contexts
 
     @patch("playwright.sync_api.sync_playwright")
     def test_normal_search_results_use_fallback_aware_scraper(self, sync):
@@ -1197,6 +1216,18 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
 
         self.assertEqual(results[0]["asin"], "B000000001")
         self.assertEqual(results[0]["title"], "Example phone")
+        launch_kwargs = browser.chromium.launch.call_args.kwargs
+        self.assertIn("--no-sandbox", launch_kwargs["args"])
+        self.assertIn("--disable-setuid-sandbox", launch_kwargs["args"])
+        self.assertIn("--disable-dev-shm-usage", launch_kwargs["args"])
+        context_kwargs = browser.new_context.call_args.kwargs
+        self.assertEqual(context_kwargs["viewport"], {"width": 1440, "height": 900})
+        self.assertIn("Accept", context_kwargs["extra_http_headers"])
+        self.assertIn("Accept-Language", context_kwargs["extra_http_headers"])
+        self.assertEqual(
+            context_kwargs["extra_http_headers"]["Upgrade-Insecure-Requests"],
+            "1",
+        )
         context.close.assert_called_once()
         browser.close.assert_called_once()
 
@@ -1208,6 +1239,24 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
             "html_snippet": "captcha",
         }
         self.assertEqual(_blocking_reason(diagnostics), "captcha")
+
+    def test_blocked_page_uses_blocked_page_exception(self):
+        page = self._page("Enter the characters you see below", products=False)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"PLAYWRIGHT_DIAGNOSTICS_DIR": directory}):
+                with self.assertRaises(AmazonBlockedPageError):
+                    from .services.amazon_search import _raise_unexpected_page
+                    _raise_unexpected_page(
+                        page,
+                        "iphone 16",
+                        {
+                            "url": page.url,
+                            "title": "Robot Check",
+                            "body_text": "Enter the characters you see below",
+                            "html_snippet": "captcha",
+                            "html": "<html>captcha</html>",
+                        },
+                    )
 
     def test_empty_page_raises_diagnostic_exception_with_artifacts(self):
         page = self._page("", products=False)
@@ -1242,6 +1291,76 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
         self.assertIn("title: Amazon.in Search", message)
         context.close.assert_called_once()
         browser.close.assert_called_once()
+
+    @patch("apps.importer.services.amazon_search.time.sleep")
+    @patch("playwright.sync_api.sync_playwright")
+    def test_chrome_error_navigation_retries_with_fresh_context(self, sync, sleep):
+        broken = self._page("", products=False)
+        broken.url = "chrome-error://chromewebdata/"
+        recovered = self._page("Example phone", products=True)
+        manager, browser, contexts = self._runtime_for_pages([broken, recovered])
+        sync.return_value = manager
+
+        results = _scrape_search_results("iphone 16")
+
+        self.assertEqual(results[0]["asin"], "B000000001")
+        self.assertEqual(browser.new_context.call_count, 2)
+        self.assertEqual(sleep.call_count, 1)
+        contexts[0].close.assert_called_once()
+        contexts[1].close.assert_called_once()
+
+    @patch("apps.importer.services.amazon_search.time.sleep")
+    @patch("playwright.sync_api.sync_playwright")
+    def test_download_starting_retries_navigation(self, sync, sleep):
+        from playwright.sync_api import Error as PlaywrightError
+
+        broken = self._page("", products=False)
+        broken.goto.side_effect = PlaywrightError("Page.goto: Download is starting")
+        recovered = self._page("Example phone", products=True)
+        manager, browser, contexts = self._runtime_for_pages([broken, recovered])
+        sync.return_value = manager
+
+        results = _scrape_search_results("iphone 16")
+
+        self.assertEqual(results[0]["asin"], "B000000001")
+        self.assertEqual(browser.new_context.call_count, 2)
+        contexts[0].close.assert_called_once()
+
+    @patch("apps.importer.services.amazon_search.time.sleep")
+    @patch("playwright.sync_api.sync_playwright")
+    def test_navigation_timeout_retries_and_can_recover(self, sync, sleep):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        broken = self._page("", products=False)
+        broken.goto.side_effect = PlaywrightTimeoutError("navigation timeout")
+        recovered = self._page("Example phone", products=True)
+        manager, browser, contexts = self._runtime_for_pages([broken, recovered])
+        sync.return_value = manager
+
+        results = _scrape_search_results("iphone 16")
+
+        self.assertEqual(results[0]["asin"], "B000000001")
+        self.assertEqual(browser.new_context.call_count, 2)
+
+    @patch("apps.importer.services.amazon_search.time.sleep")
+    @patch("playwright.sync_api.sync_playwright")
+    def test_all_navigation_attempts_fail_with_navigation_error(self, sync, sleep):
+        pages = []
+        for _ in range(3):
+            page = self._page("", products=False)
+            page.url = "chrome-error://chromewebdata/"
+            pages.append(page)
+        manager, browser, contexts = self._runtime_for_pages(pages)
+        sync.return_value = manager
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"PLAYWRIGHT_DIAGNOSTICS_DIR": directory}):
+                with self.assertRaises(AmazonNavigationError) as raised:
+                    _scrape_search_results("iphone 16")
+
+        self.assertIn("chrome_error_url: True", str(raised.exception))
+        self.assertEqual(browser.new_context.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
 
 class ImporterAdminTests(TestCase):
