@@ -81,6 +81,7 @@ def amazon_search_task(self, search_keyword_id, job_id=None):
 
 @shared_task(bind=True, name="apps.core.tasks.amazon_product_extraction_task")
 def amazon_product_extraction_task(self, search_result_id, job_id=None):
+    from asgiref.sync import sync_to_async
     from apps.importer.models import AmazonProduct, AmazonSearchResult, ImporterJobMarketplace, ImporterJobType
     from apps.importer.services.jobs import mark_job_completed, mark_job_skipped, update_job_progress
     from apps.importer.services.amazon_product import process_amazon_search_result
@@ -92,7 +93,13 @@ def amazon_product_extraction_task(self, search_result_id, job_id=None):
     job = _job_for_task(job_id, title=f"Amazon Product Extraction — {result.asin}", job_type=ImporterJobType.AMAZON_PRODUCT_EXTRACTION, marketplace=ImporterJobMarketplace.AMAZON)
     _start_job(job)
     try:
-        processed = process_amazon_search_result(result)
+        async def report_basic_data(_data):
+            await sync_to_async(update_job_progress, thread_sensitive=True)(
+                job,
+                result_message="Basic product data extracted; detailed specifications extracting.",
+            )
+
+        processed = process_amazon_search_result(result, on_basic_data=report_basic_data)
         product = AmazonProduct.objects.get(asin=result.asin)
         job.amazon_product = product
         job.save(update_fields=["amazon_product", "updated_at"])

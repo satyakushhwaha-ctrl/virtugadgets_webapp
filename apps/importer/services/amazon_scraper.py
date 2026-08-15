@@ -1,10 +1,17 @@
 import asyncio
 import json
+import logging
 import re
 import sys
+import time
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
+
+
+logger = logging.getLogger(__name__)
+OPTIONAL_READ_TIMEOUT_MS = 1000
+REQUIRED_READY_TIMEOUT_MS = 5000
 
 
 # ============================================================
@@ -67,7 +74,7 @@ def unique_list(values):
     return result
 
 
-async def get_text(page, selectors):
+async def get_text(page, selectors, timeout=OPTIONAL_READ_TIMEOUT_MS):
     for selector in selectors:
         try:
             locator = page.locator(selector)
@@ -75,7 +82,7 @@ async def get_text(page, selectors):
 
             for i in range(min(count, 5)):
                 text = clean_text(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=timeout)
                 )
 
                 if text:
@@ -87,14 +94,14 @@ async def get_text(page, selectors):
     return None
 
 
-async def get_attribute(page, selectors, attribute):
+async def get_attribute(page, selectors, attribute, timeout=OPTIONAL_READ_TIMEOUT_MS):
     for selector in selectors:
         try:
             locator = page.locator(selector)
             count = await locator.count()
 
             for i in range(min(count, 10)):
-                value = await locator.nth(i).get_attribute(attribute)
+                value = await locator.nth(i).get_attribute(attribute, timeout=timeout)
 
                 if value:
                     return clean_text(value)
@@ -219,7 +226,7 @@ async def extract_selling_price(page, product_ld=None):
 
             for i in range(min(count, 5)):
                 text = clean_text(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 price = clean_price(text)
@@ -246,7 +253,7 @@ async def extract_selling_price(page, product_ld=None):
 
             for i in range(min(count, 5)):
                 price = clean_price(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if price is not None:
@@ -270,7 +277,7 @@ async def extract_selling_price(page, product_ld=None):
 
             for i in range(min(count, 5)):
                 price = clean_price(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if price is not None:
@@ -311,7 +318,7 @@ async def extract_mrp(page):
 
             for i in range(min(count, 5)):
                 price = clean_price(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if price is not None:
@@ -340,7 +347,7 @@ async def extract_discount(page):
 
             for i in range(min(count, 5)):
                 text = clean_text(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if not text:
@@ -375,6 +382,9 @@ async def extract_product(page, product_ld):
         brand = clean_text(ld_brand.get("name"))
     elif isinstance(ld_brand, str):
         brand = clean_text(ld_brand)
+
+    if not brand:
+        brand = await get_text(page, ["#bylineInfo", "#brand", "[data-brand]"])
 
     description = clean_text(
         product_ld.get("description")
@@ -536,7 +546,7 @@ async def extract_quantity_limit(page):
                 quantities = []
 
                 for i in range(option_count):
-                    value = await options.nth(i).get_attribute("value")
+                    value = await options.nth(i).get_attribute("value", timeout=OPTIONAL_READ_TIMEOUT_MS)
 
                     if value and value.isdigit():
                         quantities.append(int(value))
@@ -544,7 +554,7 @@ async def extract_quantity_limit(page):
                 if quantities:
                     return max(quantities)
 
-            value = await element.get_attribute("value")
+            value = await element.get_attribute("value", timeout=OPTIONAL_READ_TIMEOUT_MS)
 
             if value and value.isdigit():
                 return int(value)
@@ -577,7 +587,7 @@ async def extract_delivery(page):
 
             for i in range(min(count, 5)):
                 text = clean_text(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if text:
@@ -637,12 +647,12 @@ async def extract_rating(page, product_ld):
 
             for i in range(min(count, 5)):
                 text = clean_text(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if not text:
                     text = clean_text(
-                        await locator.nth(i).get_attribute("title")
+                        await locator.nth(i).get_attribute("title", timeout=OPTIONAL_READ_TIMEOUT_MS)
                     )
 
                 if not text:
@@ -690,7 +700,7 @@ async def extract_review_count(page, product_ld):
 
             for i in range(min(count, 5)):
                 text = clean_text(
-                    await locator.nth(i).inner_text()
+                    await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if not text:
@@ -760,10 +770,10 @@ async def extract_images(page, product_ld):
             locator = page.locator(selector)
             count = await locator.count()
 
-            for i in range(count):
+            for i in range(min(count, 30)):
                 src = (
-                    await locator.nth(i).get_attribute("data-old-hires")
-                    or await locator.nth(i).get_attribute("src")
+                    await locator.nth(i).get_attribute("data-old-hires", timeout=OPTIONAL_READ_TIMEOUT_MS)
+                    or await locator.nth(i).get_attribute("src", timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
 
                 if not src:
@@ -800,9 +810,9 @@ async def extract_highlights(page):
 
         count = await locator.count()
 
-        for i in range(count):
+        for i in range(min(count, 25)):
             text = clean_text(
-                await locator.nth(i).inner_text()
+                await locator.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
             )
 
             if text:
@@ -832,17 +842,17 @@ async def extract_specifications(page):
             rows = page.locator(selector)
             count = await rows.count()
 
-            for i in range(count):
+            for i in range(min(count, 60)):
                 cells = rows.nth(i).locator("th, td")
                 cell_count = await cells.count()
 
                 if cell_count >= 2:
                     key = clean_text(
-                        await cells.nth(0).inner_text()
+                        await cells.nth(0).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                     )
 
                     value = clean_text(
-                        await cells.nth(1).inner_text()
+                        await cells.nth(1).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                     )
 
                     if key and value:
@@ -859,9 +869,9 @@ async def extract_specifications(page):
 
         count = await bullets.count()
 
-        for i in range(count):
+        for i in range(min(count, 30)):
             text = clean_text(
-                await bullets.nth(i).inner_text()
+                await bullets.nth(i).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
             )
 
             if not text or ":" not in text:
@@ -941,7 +951,7 @@ async def extract_reviews(page):
                 title = clean_text(
                     await review.locator(
                         "[data-hook='review-title']"
-                    ).inner_text()
+                    ).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
             except Exception:
                 title = None
@@ -950,7 +960,7 @@ async def extract_reviews(page):
                 body = clean_text(
                     await review.locator(
                         "[data-hook='review-body']"
-                    ).inner_text()
+                    ).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
             except Exception:
                 body = None
@@ -959,7 +969,7 @@ async def extract_reviews(page):
                 rating_text = clean_text(
                     await review.locator(
                         "[data-hook='review-star-rating']"
-                    ).inner_text()
+                    ).inner_text(timeout=OPTIONAL_READ_TIMEOUT_MS)
                 )
             except Exception:
                 rating_text = None
@@ -992,15 +1002,26 @@ async def extract_reviews(page):
 # MAIN SCRAPER
 # ============================================================
 
-async def scrape_amazon(url):
+async def scrape_amazon(url, on_basic_data=None):
+    started_at = time.perf_counter()
+    timings = {}
+
+    def mark(name, started):
+        timings[name] = round(time.perf_counter() - started, 3)
+
     async with async_playwright() as p:
 
+        browser_started = time.perf_counter()
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
             ],
         )
+        mark("browser_launch", browser_started)
 
         context = await browser.new_context(
             viewport={
@@ -1010,10 +1031,15 @@ async def scrape_amazon(url):
             locale="en-IN",
             timezone_id="Asia/Kolkata",
             user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "Mozilla/5.0 (X11; Linux x86_64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/151.0.0.0 Safari/537.36"
             ),
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-IN,en;q=0.9",
+                "Upgrade-Insecure-Requests": "1",
+            },
         )
 
         page = await context.new_page()
@@ -1032,41 +1058,41 @@ async def scrape_amazon(url):
 
         print("Opening:", url)
 
+        navigation_started = time.perf_counter()
         response = await page.goto(
             url,
             wait_until="domcontentloaded",
             timeout=60000,
         )
+        mark("page_navigation", navigation_started)
 
         if response:
             print("HTTP status:", response.status)
 
-        # Allow Amazon's dynamic price/product area to render.
-        await page.wait_for_timeout(5000)
+        # Wait only for the primary identity element. JSON-LD/initial HTML can
+        # still supply the product when Amazon omits this element.
+        ready_started = time.perf_counter()
+        try:
+            await page.wait_for_selector(
+                "#productTitle",
+                state="attached",
+                timeout=REQUIRED_READY_TIMEOUT_MS,
+            )
+        except Exception:
+            logger.info("Amazon product title was not ready within %sms; continuing with structured HTML.", REQUIRED_READY_TIMEOUT_MS)
+        mark("page_ready", ready_started)
 
-        for selector in [
-            "#productTitle",
-            "#dp",
-            "#ppd",
-        ]:
-            try:
-                await page.wait_for_selector(
-                    selector,
-                    timeout=10000,
-                )
-                break
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(2000)
-
+        html_started = time.perf_counter()
         html = await page.content()
+        mark("html", html_started)
 
         # ====================================================
         # JSON-LD
         # ====================================================
 
+        jsonld_started = time.perf_counter()
         json_ld = await extract_json_ld(page)
+        mark("jsonld", jsonld_started)
 
         product_ld = find_product_json_ld(
             json_ld
@@ -1085,18 +1111,81 @@ async def scrape_amazon(url):
         # PRODUCT
         # ====================================================
 
+        title_started = time.perf_counter()
         product = await extract_product(
             page,
             product_ld,
         )
+        mark("title", title_started)
+
+        # ====================================================
+        # FAST BASIC PHASE
+        # ====================================================
+
+        pricing_started = time.perf_counter()
+        selling_price = await extract_selling_price(page, product_ld)
+        mrp = await extract_mrp(page)
+        mark("pricing", pricing_started)
+
+        discount_percentage = None
+        if selling_price is not None and mrp is not None and mrp > selling_price:
+            discount_percentage = round(((mrp - selling_price) / mrp) * 100)
+        elif selling_price is not None and mrp is not None and mrp == selling_price:
+            discount_percentage = 0
+        elif selling_price is not None and mrp is not None and mrp < selling_price:
+            print("WARNING: MRP is lower than selling price. Ignoring MRP.")
+            mrp = None
+
+        min_price = selling_price
+        max_price = selling_price
+
+        seller_started = time.perf_counter()
+        seller = await extract_seller(page)
+        mark("seller", seller_started)
+
+        availability_started = time.perf_counter()
+        stock_status = await extract_stock(page, product_ld)
+        quantity_limit = await extract_quantity_limit(page)
+        mark("availability", availability_started)
+
+        if on_basic_data is not None:
+            basic_result = {
+                "asin": asin,
+                "product": {
+                    "id": asin,
+                    "asin": asin,
+                    "sku": asin,
+                    "title": product["title"],
+                    "brand": product["brand"],
+                    "description": product["description"],
+                },
+                "pricing": {
+                    "currency": "INR",
+                    "selling_price": selling_price,
+                    "mrp": mrp,
+                    "discount_percentage": discount_percentage,
+                    "min_price": min_price,
+                    "max_price": max_price,
+                },
+                "seller": seller,
+                "availability": {
+                    "status": stock_status,
+                    "purchase_quantity_limit": quantity_limit,
+                },
+            }
+            callback_result = on_basic_data(basic_result)
+            if hasattr(callback_result, "__await__"):
+                await callback_result
 
         # ====================================================
         # SPECIFICATIONS
         # ====================================================
 
+        specifications_started = time.perf_counter()
         specifications = await extract_specifications(
             page
         )
+        mark("specifications", specifications_started)
 
         # Brand fallback
         if not product["brand"]:
@@ -1106,96 +1195,20 @@ async def scrape_amazon(url):
             )
 
         # ====================================================
-        # PRICING
-        # ====================================================
-
-        # IMPORTANT:
-        # Pass product_ld as the second argument.
-        # This fixes the TypeError from the previous version.
-        selling_price = await extract_selling_price(
-            page,
-            product_ld,
-        )
-
-        mrp = await extract_mrp(
-            page
-        )
-
-        # Calculate discount from the actual selling price
-        # and MRP whenever both are valid.
-        discount_percentage = None
-
-        if (
-            selling_price is not None
-            and mrp is not None
-            and mrp > selling_price
-        ):
-            discount_percentage = round(
-                (
-                    (mrp - selling_price)
-                    / mrp
-                ) * 100
-            )
-
-        elif (
-            selling_price is not None
-            and mrp is not None
-            and mrp == selling_price
-        ):
-            discount_percentage = 0
-
-        # Sanity check
-        if (
-            selling_price is not None
-            and mrp is not None
-            and mrp < selling_price
-        ):
-            print(
-                "WARNING: MRP is lower than selling price. "
-                "Ignoring MRP."
-            )
-
-            mrp = None
-            discount_percentage = None
-
-        # We are on one product page, so min/max are the
-        # current product price. Do not scan the whole page.
-        min_price = selling_price
-        max_price = selling_price
-
-        # ====================================================
-        # SELLER
-        # ====================================================
-
-        seller = await extract_seller(
-            page
-        )
-
-        # ====================================================
-        # AVAILABILITY
-        # ====================================================
-
-        stock_status = await extract_stock(
-            page,
-            product_ld,
-        )
-
-        quantity_limit = await extract_quantity_limit(
-            page
-        )
-
-        # ====================================================
         # DELIVERY
         # ====================================================
 
+        delivery_started = time.perf_counter()
         delivery = await extract_delivery(
             page
         )
+        mark("delivery", delivery_started)
 
         # ====================================================
         # RATINGS
         # ====================================================
 
+        ratings_started = time.perf_counter()
         rating = await extract_rating(
             page,
             product_ld,
@@ -1216,39 +1229,47 @@ async def scrape_amazon(url):
             )
         except Exception:
             pass
+        mark("ratings", ratings_started)
 
         # ====================================================
         # IMAGES
         # ====================================================
 
+        images_started = time.perf_counter()
         images = await extract_images(
             page,
             product_ld,
         )
+        mark("images", images_started)
 
         # ====================================================
         # HIGHLIGHTS
         # ====================================================
 
+        highlights_started = time.perf_counter()
         highlights = await extract_highlights(
             page
         )
+        mark("highlights", highlights_started)
 
         # ====================================================
         # RANKING
         # ====================================================
 
+        ranking_started = time.perf_counter()
         ranking = extract_ranking(
             specifications
         )
+        mark("ranking", ranking_started)
 
         # ====================================================
         # REVIEWS
         # ====================================================
 
-        reviews = await extract_reviews(
-            page
-        )
+        # Full review extraction is intentionally outside the critical path.
+        # Ratings/count are already read from JSON-LD or lightweight selectors.
+        reviews = []
+        timings["reviews"] = 0.0
 
         # ====================================================
         # FINAL RESULT
@@ -1306,6 +1327,16 @@ async def scrape_amazon(url):
                 "json_ld": json_ld,
             },
         }
+
+        timings["total"] = round(time.perf_counter() - started_at, 3)
+        timing_message = " ".join(
+            f"{key}={value}s" for key, value in timings.items()
+        )
+        logger.info(
+            "[AMAZON TIMING] %s",
+            timing_message,
+        )
+        print(f"[AMAZON TIMING] {timing_message}", flush=True)
 
         await browser.close()
 

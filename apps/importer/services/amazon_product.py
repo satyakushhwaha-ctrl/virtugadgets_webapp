@@ -6,9 +6,12 @@ the async scraper response into the existing staging/workflow model.
 
 import asyncio
 import inspect
+import logging
 import re
+import time
 from decimal import Decimal
 
+from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.utils import timezone
 
@@ -17,16 +20,19 @@ from .amazon_scraper import scrape_amazon
 from .jobs import concise_error_message
 
 
-def _run_scraper(url):
-    result = scrape_amazon(url)
+logger = logging.getLogger(__name__)
+
+
+def _run_scraper(url, on_basic_data=None):
+    result = scrape_amazon(url, on_basic_data=on_basic_data)
     if inspect.isawaitable(result):
         return asyncio.run(result)
     return result
 
 
-def extract_amazon_product_data(url: str) -> dict:
+def extract_amazon_product_data(url: str, on_basic_data=None) -> dict:
     """Compatibility name for callers; the canonical implementation is the standalone scraper."""
-    return _run_scraper(url)
+    return _run_scraper(url, on_basic_data=on_basic_data)
 
 
 def _nested(data, key, legacy_key=None):
@@ -72,9 +78,7 @@ def _weight_kg(value):
     return amount / 1000 if (match.group(2) or "").lower().startswith("g") else amount
 
 
-def extract_amazon_product(url: str) -> dict:
-    """Return the scraper response mapped to AmazonProduct field names."""
-    raw = extract_amazon_product_data(url)
+def _map_amazon_product_response(raw, url: str) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("Amazon product scraper returned invalid data.")
     product = _nested(raw, "product")
@@ -116,6 +120,23 @@ def extract_amazon_product(url: str) -> dict:
     }
 
 
+def extract_amazon_product(url: str, on_basic_data=None) -> dict:
+    """Return mapped data, persisting a basic phase callback before details finish."""
+    async def forward_basic_data(raw_basic):
+        if on_basic_data is None:
+            return
+        mapped_basic = _map_amazon_product_response(raw_basic, url)
+        callback_result = on_basic_data(mapped_basic)
+        if inspect.isawaitable(callback_result):
+            await callback_result
+
+    raw = extract_amazon_product_data(
+        url,
+        on_basic_data=forward_basic_data if on_basic_data else None,
+    )
+    return _map_amazon_product_response(raw, url)
+
+
 _EXTRACTED_FIELDS = (
     "product_title", "brand", "url", "availability", "images", "description",
     "highlights", "specifications", "mrp_inr",
@@ -124,9 +145,33 @@ _EXTRACTED_FIELDS = (
     "storage", "operating_system", "display_size", "resolution", "color", "weight_kg",
     "software", "warranty",
 )
+_BASIC_FIELDS = (
+    "product_title", "brand", "url", "availability", "mrp_inr",
+    "current_selling_price_inr", "selling_price_min_inr", "selling_price_max_inr",
+    "discount_percentage", "primary_seller", "seller_rating",
+)
 
 
-def process_amazon_search_result(search_result: AmazonSearchResult) -> bool:
+def _persist_extracted_fields(product, data, fields):
+    changed_fields = []
+    for field in fields:
+        value = data.get(field)
+        if value is None:
+            continue
+        if field == "description":
+            value = value or ""
+        elif field == "highlights":
+            value = value or []
+        elif field == "specifications":
+            value = value or {}
+        setattr(product, field, value)
+        changed_fields.append(field)
+    if changed_fields:
+        product.save(update_fields=changed_fields + ["updated_at"])
+
+
+def process_amazon_search_result(search_result: AmazonSearchResult, on_basic_data=None) -> bool:
+    total_started = time.perf_counter()
     asin = (search_result.asin or "").strip().upper()
     if not asin:
         raise ValueError("Amazon search result is missing an ASIN.")
@@ -138,27 +183,45 @@ def process_amazon_search_result(search_result: AmazonSearchResult) -> bool:
     product.error_message = ""
     product.save(update_fields=["status", "error_message", "updated_at"])
     try:
-        data = extract_amazon_product(search_result.product_url)
+        async def save_basic_data(data):
+            await sync_to_async(_persist_extracted_fields, thread_sensitive=True)(
+                product,
+                data,
+                _BASIC_FIELDS,
+            )
+            if on_basic_data is not None:
+                callback_result = on_basic_data(data)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+
+        data = extract_amazon_product(
+            search_result.product_url,
+            on_basic_data=save_basic_data,
+        )
         extracted_asin = (data.get("asin") or asin).strip().upper()
         if extracted_asin != asin:
             raise ValueError(f"Scraper ASIN {extracted_asin!r} does not match search result ASIN {asin!r}.")
+        database_started = time.perf_counter()
         with transaction.atomic():
-            for field in _EXTRACTED_FIELDS:
-                value = data.get(field)
-                if field == "description":
-                    value = value or ""
-                elif field == "highlights":
-                    value = value or []
-                elif field == "specifications":
-                    value = value or {}
-                setattr(product, field, value)
+            _persist_extracted_fields(product, data, _EXTRACTED_FIELDS)
             product.asin = asin
             product.status = ImportStatus.COMPLETED
             product.error_message = ""
             product.extracted_at = timezone.now()
-            product.save()
+            product.save(update_fields=["asin", "status", "error_message", "extracted_at", "updated_at"])
             search_result.processed = True
             search_result.save(update_fields=["processed"])
+        timing_message = (
+            f"database={time.perf_counter() - database_started:.3f}s "
+            f"total={time.perf_counter() - total_started:.3f}s asin={asin}"
+        )
+        logger.info(
+            "[AMAZON TIMING] database=%.3fs total=%.3fs asin=%s",
+            time.perf_counter() - database_started,
+            time.perf_counter() - total_started,
+            asin,
+        )
+        print(f"[AMAZON TIMING] {timing_message}", flush=True)
     except Exception as exc:
         product.status = ImportStatus.FAILED
         product.error_message = concise_error_message(exc)

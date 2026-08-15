@@ -218,7 +218,8 @@ class ImporterJobTests(TestCase):
             asin=source.asin, url=source.product_url,
         )
         result = amazon_product_extraction_task.run(str(source.pk))
-        service.assert_called_once_with(AmazonSearchResult.objects.get(pk=source.pk))
+        self.assertEqual(service.call_args.args[0], AmazonSearchResult.objects.get(pk=source.pk))
+        self.assertIn("on_basic_data", service.call_args.kwargs)
         self.assertEqual(result["status"], "completed")
         job = ImporterJob.objects.get(pk=result["job_id"])
         self.assertEqual(job.status, ImporterJobStatus.COMPLETED)

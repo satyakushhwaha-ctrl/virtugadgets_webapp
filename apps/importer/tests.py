@@ -1,5 +1,6 @@
 import os
 import tempfile
+from asgiref.sync import sync_to_async
 from io import StringIO
 from types import SimpleNamespace
 from pathlib import Path
@@ -9,7 +10,7 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
 from django.db import IntegrityError
-from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase, TransactionTestCase
 from django.utils import timezone
 
 from .models import (
@@ -1137,6 +1138,89 @@ class ImporterTests(TestCase):
         )
         best_match = ProductMatch.objects.get(flipkart_product=best)
         self.assertEqual(best_match.match_status, "matched")
+
+
+class AmazonPhasedExtractionTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.keyword = SearchKeyword.objects.create(keyword="phased extraction")
+
+    def make_search_result(self):
+        return AmazonSearchResult.objects.create(
+            keyword=self.keyword,
+            asin="B0PHASED001",
+            title="Phased phone",
+            product_url="https://www.amazon.in/dp/B0PHASED001",
+            position=1,
+        )
+
+    def phased_response(self, asin):
+        return {
+            "url": f"https://www.amazon.in/dp/{asin}",
+            "product": {"asin": asin, "title": "Phased phone", "brand": "Samsung"},
+            "pricing": {"selling_price": 94999, "mrp": 119999, "min_price": 94999, "max_price": 94999, "discount_percentage": 21},
+            "seller": {"name": "Amazon Seller"},
+            "availability": {"status": "IN_STOCK"},
+            "images": ["https://images.example/phased.jpg"],
+            "highlights": ["Fast phone"],
+            "specifications": {"Processor": "Snapdragon", "RAM": "12GB", "Storage": "256GB"},
+        }
+
+    @patch("apps.importer.services.amazon_product.scrape_amazon")
+    def test_basic_data_is_saved_before_detailed_phase(self, scraper):
+        result = self.make_search_result()
+        raw = self.phased_response(result.asin)
+        observations = []
+
+        async def phased_scraper(url, on_basic_data=None):
+            await on_basic_data({
+                "url": raw["url"],
+                "product": raw["product"],
+                "pricing": raw["pricing"],
+                "seller": raw["seller"],
+                "availability": raw["availability"],
+            })
+            current = await sync_to_async(
+                lambda: AmazonProduct.objects.get(asin=result.asin),
+                thread_sensitive=True,
+            )()
+            observations.append((current.brand, current.current_selling_price_inr))
+            return raw
+
+        scraper.side_effect = phased_scraper
+
+        self.assertTrue(process_amazon_search_result(result))
+        self.assertEqual(observations, [("Samsung", 94999)])
+        product = AmazonProduct.objects.get(asin=result.asin)
+        self.assertEqual(product.processor, "Snapdragon")
+        self.assertEqual(AmazonProduct.objects.filter(asin=result.asin).count(), 1)
+
+    @patch("apps.importer.services.amazon_product.scrape_amazon")
+    def test_basic_data_survives_detailed_extraction_failure(self, scraper):
+        result = self.make_search_result()
+        raw = self.phased_response(result.asin)
+
+        async def failing_scraper(url, on_basic_data=None):
+            await on_basic_data({
+                "url": raw["url"],
+                "product": raw["product"],
+                "pricing": raw["pricing"],
+                "seller": raw["seller"],
+                "availability": raw["availability"],
+            })
+            raise RuntimeError("Detailed specifications failed")
+
+        scraper.side_effect = failing_scraper
+
+        with self.assertRaises(RuntimeError):
+            process_amazon_search_result(result)
+
+        product = AmazonProduct.objects.get(asin=result.asin)
+        self.assertEqual(product.brand, "Samsung")
+        self.assertEqual(product.current_selling_price_inr, 94999)
+        self.assertEqual(product.mrp_inr, 119999)
+        self.assertEqual(product.status, ImportStatus.FAILED)
 
 
 class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):

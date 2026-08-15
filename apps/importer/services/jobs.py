@@ -94,7 +94,7 @@ def update_job_progress(job, *, total_items=None, processed_items=None, success_
 
 def _finish(job, status, *, result_message="", error_message=""):
     job.status = status
-    job.result_message = result_message
+    job.result_message = result_message or job.result_message
     job.error_message = error_message
     job.completed_at = timezone.now()
     job.save(update_fields=["status", "result_message", "error_message", "completed_at", "updated_at"])
