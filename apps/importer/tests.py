@@ -1412,6 +1412,23 @@ class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):
 
     @patch("apps.importer.services.amazon_search.time.sleep")
     @patch("playwright.sync_api.sync_playwright")
+    def test_download_starting_uses_usable_html_without_retry(self, sync, sleep):
+        from playwright.sync_api import Error as PlaywrightError
+
+        page = self._page("Example phone", products=True)
+        page.goto.side_effect = PlaywrightError("Page.goto: Download is starting")
+        manager, browser, context = self._runtime(page)
+        sync.return_value = manager
+
+        results = _scrape_search_results("iphone 16")
+
+        self.assertEqual(results[0]["asin"], "B000000001")
+        self.assertEqual(browser.new_context.call_count, 1)
+        sleep.assert_not_called()
+        context.close.assert_called_once()
+
+    @patch("apps.importer.services.amazon_search.time.sleep")
+    @patch("playwright.sync_api.sync_playwright")
     def test_navigation_timeout_retries_and_can_recover(self, sync, sleep):
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 

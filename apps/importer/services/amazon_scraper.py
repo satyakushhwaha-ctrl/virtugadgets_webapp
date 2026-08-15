@@ -11,7 +11,7 @@ from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
 OPTIONAL_READ_TIMEOUT_MS = 1000
-REQUIRED_READY_TIMEOUT_MS = 5000
+REQUIRED_READY_TIMEOUT_MS = 750
 
 
 # ============================================================

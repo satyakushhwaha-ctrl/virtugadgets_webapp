@@ -107,6 +107,40 @@ def _is_chrome_error_url(url: str) -> bool:
     return (url or "").lower().startswith("chrome-error://")
 
 
+def _has_usable_search_document(page, response=None) -> bool:
+    """Return True when a navigation exception still left usable results."""
+    try:
+        url = page.url
+    except Exception:
+        return False
+    if _is_chrome_error_url(url):
+        return False
+
+    response_info = _response_diagnostics(response)
+    content_type = str(response_info["content_type"] or "").lower()
+    if content_type and not any(
+        value in content_type for value in ("text/html", "application/xhtml+xml")
+    ):
+        return False
+
+    try:
+        html = page.content()
+    except Exception:
+        return False
+    if not html or "<html" not in html.lower():
+        return False
+    if _blocking_reason(_page_diagnostics(page)):
+        return False
+
+    for selector in PRODUCT_SELECTORS:
+        try:
+            if page.locator(selector).count():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _raise_navigation_error(
     page,
     keyword: str,
@@ -343,6 +377,13 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                 except PlaywrightError as exc:
                     if "Download is starting" not in str(exc):
                         raise
+                    if _has_usable_search_document(page, response):
+                        logger.info(
+                            "Amazon search navigation reported a download but left usable HTML; continuing: url=%s",
+                            page.url,
+                        )
+                        navigation_ready = True
+                        break
                     _log_navigation_diagnostics(
                         page, keyword, requested_url, response=response, cause=exc
                     )
