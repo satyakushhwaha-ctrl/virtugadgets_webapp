@@ -33,6 +33,34 @@ _BLOCK_MARKERS = (
 )
 
 
+class AmazonProviderError(RuntimeError):
+    """A safe, structured failure from one Amazon product provider."""
+
+    def __init__(self, message, *, provider, stage, status=None, content_type="",
+                 body_length=None, page_url="", page_title="", flags=None):
+        super().__init__(message)
+        self.provider = provider
+        self.stage = stage
+        self.status = status
+        self.content_type = content_type
+        self.body_length = body_length
+        self.page_url = page_url
+        self.page_title = page_title
+        self.flags = flags or {}
+
+
+class AmazonProductExtractionError(RuntimeError):
+    """Raised after both product providers fail, with both causes retained."""
+
+
+class _ProviderPayload(dict):
+    """Dict-shaped provider data with non-sensitive response diagnostics."""
+
+    def __init__(self, data, diagnostics=None):
+        super().__init__(data)
+        self.diagnostics = diagnostics or {}
+
+
 def _run_scraper(url, on_basic_data=None):
     result = scrape_amazon(url, on_basic_data=on_basic_data)
     if inspect.isawaitable(result):
@@ -48,6 +76,68 @@ def extract_amazon_product_data(url: str, on_basic_data=None) -> dict:
 def _html_text(value):
     value = re.sub(r"<[^>]+>", " ", value or "")
     return re.sub(r"\s+", " ", unescape(value)).strip()
+
+
+def _asin_from_url(url):
+    match = re.search(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})", url or "", re.I)
+    return match.group(1).upper() if match else "unknown"
+
+
+def _page_flags(*values):
+    text = " ".join(str(value or "") for value in values).lower()
+    return {
+        "captcha": "captcha" in text,
+        "robot_check": "robot check" in text,
+        "access_denied": "access denied" in text,
+        "download_response": "download is starting" in text or "download" in text,
+        "empty_page": not text.strip(),
+    }
+
+
+def _safe_error_message(exc):
+    message = str(exc) or exc.__class__.__name__
+    return re.sub(r"(?i)(api[_-]?key|key)=[^&\s]+", r"\1=<redacted>", message)
+
+
+def _diagnostic_reason(flags):
+    return ", ".join(name.replace("_", " ") for name, present in flags.items() if present) or "none detected"
+
+
+def _log_playwright_failure(asin, url, exc, *, stage=None):
+    flags = getattr(exc, "flags", None) or _page_flags(str(exc))
+    logger.error(
+        "[AMAZON PRODUCT] Playwright FAILED asin=%s url=%s stage=%s "
+        "exception_type=%s reason=%s status=%s page_url=%s page_title=%s page_appears=%s",
+        asin, url, stage or getattr(exc, "stage", "navigation"),
+        exc.__class__.__name__, _safe_error_message(exc),
+        getattr(exc, "status", None), getattr(exc, "page_url", "") or "<unavailable>",
+        getattr(exc, "page_title", "") or "<unavailable>", _diagnostic_reason(flags),
+    )
+
+
+def _log_scrapingbee_failure(asin, url, exc):
+    flags = getattr(exc, "flags", None) or _page_flags(str(exc))
+    logger.error(
+        "[AMAZON PRODUCT] ScrapingBee FAILED asin=%s url=%s status=%s "
+        "exception_type=%s reason=%s content_type=%s body_length=%s response_appears=%s",
+        asin, url, getattr(exc, "status", None), exc.__class__.__name__,
+        _safe_error_message(exc), getattr(exc, "content_type", "") or "<unknown>",
+        getattr(exc, "body_length", None), _diagnostic_reason(flags),
+    )
+
+
+def _provider_summary(outcome):
+    if outcome["stage"] == "validation":
+        return "validation failed; missing required fields: " + ", ".join(outcome["missing_required"])
+    if outcome.get("status"):
+        error = _safe_error_message(outcome.get("error", ""))
+        prefix = f"HTTP {outcome['status']}"
+        return error if error.startswith(prefix) else f"{prefix} {error}".strip()
+    return f"{outcome['stage']} failed; {_safe_error_message(outcome.get('error', ''))}"
+
+
+def _provider_label(provider):
+    return "ScrapingBee" if provider == "scrapingbee" else "Playwright"
 
 
 def _json_ld_product(html):
@@ -109,9 +199,13 @@ def _static_html_product(url, html):
 
 
 def _extract_scrapingbee_product_data(url: str):
+    asin = _asin_from_url(url)
     api_key = os.getenv("SCRAPINGBEE_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("Amazon product fallback is unavailable: SCRAPINGBEE_API_KEY is not configured.")
+        raise AmazonProviderError(
+            "SCRAPINGBEE_API_KEY is not configured",
+            provider="scrapingbee", stage="configuration",
+        )
     try:
         response = requests.get(
             SCRAPINGBEE_URL,
@@ -119,13 +213,40 @@ def _extract_scrapingbee_product_data(url: str):
             timeout=30,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"ScrapingBee Amazon product request failed: {exc}") from exc
+        raise AmazonProviderError(
+            _safe_error_message(exc), provider="scrapingbee", stage="request",
+        ) from exc
     html = response.text or ""
-    if response.status_code != 200 or "html" not in response.headers.get("content-type", "").lower():
-        raise RuntimeError(f"ScrapingBee Amazon product returned HTTP {response.status_code}.")
+    content_type = response.headers.get("content-type", "")
+    flags = _page_flags(html)
+    if response.status_code != 200:
+        raise AmazonProviderError(
+            f"HTTP {response.status_code} {response.reason or ''}".strip(),
+            provider="scrapingbee", stage="response", status=response.status_code,
+            content_type=content_type, body_length=len(html), flags=flags,
+        )
+    if not html:
+        raise AmazonProviderError(
+            "empty response body", provider="scrapingbee", stage="response",
+            status=response.status_code, content_type=content_type,
+            body_length=0, flags=flags,
+        )
+    if "html" not in content_type.lower():
+        raise AmazonProviderError(
+            f"non-HTML response ({content_type or '<unknown>'})",
+            provider="scrapingbee", stage="response", status=response.status_code,
+            content_type=content_type, body_length=len(html), flags=flags,
+        )
     if any(marker in html.lower() for marker in _BLOCK_MARKERS):
-        raise RuntimeError("ScrapingBee returned an Amazon blocked product document.")
-    return _static_html_product(url, html)
+        raise AmazonProviderError(
+            "Amazon block page returned", provider="scrapingbee", stage="response",
+            status=response.status_code, content_type=content_type,
+            body_length=len(html), flags=flags,
+        )
+    return _ProviderPayload(
+        _static_html_product(url, html),
+        {"status": response.status_code, "content_type": content_type, "body_length": len(html)},
+    )
 
 
 def _nested(data, key, legacy_key=None):
@@ -230,34 +351,86 @@ def extract_amazon_product(url: str, on_basic_data=None) -> dict:
     attempts = [] if provider == "scrapingbee" else ["playwright"]
     if provider != "scrapingbee":
         attempts.append("scrapingbee")
-    errors = []
+    outcomes = []
+    provider_errors = []
     for current_provider in attempts:
-        logger.info("[AMAZON PRODUCT] asin=%s provider=%s", _asin_from_url(url), current_provider)
+        asin = _asin_from_url(url)
+        logger.info("[AMAZON PRODUCT] asin=%s provider=%s", asin, current_provider)
+        received = False
         try:
             raw = (
                 extract_amazon_product_data(url, on_basic_data=forward_basic_data if on_basic_data else None)
                 if current_provider == "playwright"
                 else _extract_scrapingbee_product_data(url)
             )
+            received = True
+            diagnostics = getattr(raw, "diagnostics", {})
+            if diagnostics:
+                logger.info(
+                    "[AMAZON PRODUCT] ScrapingBee page received asin=%s status=%s html_length=%s content_type=%s",
+                    asin, diagnostics.get("status"), diagnostics.get("body_length"),
+                    diagnostics.get("content_type") or "<unknown>",
+                )
             mapped = _map_amazon_product_response(raw, url)
             missing = validate_amazon_product_data(mapped)
             if missing:
-                logger.info("[AMAZON PRODUCT] asin=%s validation=failed missing=%s", _asin_from_url(url), ",".join(missing))
-                raise ValueError(f"Amazon product data is incomplete: {', '.join(missing)}")
-            logger.info("[AMAZON PRODUCT] asin=%s provider=%s validation=passed", _asin_from_url(url), current_provider)
+                outcome = {
+                    "provider": current_provider, "success": False, "stage": "validation",
+                    "missing_required": missing,
+                }
+                outcomes.append(outcome)
+                provider_errors.append(ValueError(_provider_summary(outcome)))
+                logger.error(
+                    "[AMAZON PRODUCT] validation FAILED provider=%s asin=%s missing_required=%s",
+                    current_provider, asin, ",".join(missing),
+                )
+                if current_provider == "playwright" and "scrapingbee" in attempts:
+                    logger.info("[AMAZON PRODUCT] fallback → ScrapingBee asin=%s", asin)
+                    continue
+                break
+            logger.info("[AMAZON PRODUCT] asin=%s provider=%s validation=passed", asin, current_provider)
             return mapped
         except Exception as exc:
-            errors.append(exc)
+            if isinstance(exc, AmazonProductExtractionError):
+                raise
+            stage = getattr(exc, "stage", None) or ("parse" if received else ("navigation" if current_provider == "playwright" else "request"))
+            outcome = {
+                "provider": current_provider, "success": False, "stage": stage,
+                "error_type": exc.__class__.__name__, "error": _safe_error_message(exc),
+                "status": getattr(exc, "status", None),
+            }
+            outcomes.append(outcome)
+            provider_errors.append(exc)
+            if current_provider == "playwright":
+                if received or stage == "parse":
+                    logger.error(
+                        "[AMAZON PRODUCT] Playwright parse FAILED asin=%s missing=%s reason=%s",
+                        asin, "title,brand,price", _safe_error_message(exc),
+                    )
+                else:
+                    _log_playwright_failure(asin, url, exc, stage=stage)
+            else:
+                if received:
+                    logger.error(
+                        "[AMAZON PRODUCT] ScrapingBee parse FAILED asin=%s reason=%s",
+                        asin, _safe_error_message(exc),
+                    )
+                else:
+                    _log_scrapingbee_failure(asin, url, exc)
             if current_provider == "playwright" and "scrapingbee" in attempts:
-                logger.info("[AMAZON PRODUCT] asin=%s fallback=scrapingbee", _asin_from_url(url))
+                logger.info("[AMAZON PRODUCT] fallback → ScrapingBee asin=%s", asin)
                 continue
-            raise RuntimeError("Amazon product extraction failed for all providers.") from exc
-    raise RuntimeError("Amazon product extraction failed for all providers.") from errors[-1]
-
-
-def _asin_from_url(url):
-    match = re.search(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})", url or "", re.I)
-    return match.group(1).upper() if match else "unknown"
+            break
+    summary = "; ".join(
+        f"{_provider_label(outcome['provider'])}: {_provider_summary(outcome)}."
+        for outcome in outcomes
+    )
+    final_error = AmazonProductExtractionError(
+        "Amazon product extraction failed for all providers. " + summary
+    )
+    if provider_errors:
+        raise final_error from provider_errors[-1]
+    raise final_error
 
 
 def validate_amazon_product_data(data):

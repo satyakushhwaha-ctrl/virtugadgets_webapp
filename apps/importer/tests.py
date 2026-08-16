@@ -427,6 +427,108 @@ class ImporterTests(TestCase):
         self.assertEqual(product.status, ImportStatus.FAILED)
         self.assertFalse(result.processed)
 
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", return_value=MOCK_PRODUCT)
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data", side_effect=TimeoutError("navigation timeout"))
+    def test_playwright_navigation_failure_is_logged_before_successful_fallback(self, playwright, scrapingbee):
+        with self.assertLogs("apps.importer.services.amazon_product", level="INFO") as logs:
+            from .services.amazon_product import extract_amazon_product
+            result = extract_amazon_product("https://www.amazon.in/dp/B000000001")
+
+        self.assertEqual(result["product_title"], "Example phone")
+        self.assertIn("Playwright FAILED", "\n".join(logs.output))
+        self.assertIn("navigation timeout", "\n".join(logs.output))
+        playwright.assert_called_once()
+        scrapingbee.assert_called_once()
+
+    @patch("apps.importer.services.amazon_product._map_amazon_product_response", side_effect=[ValueError("malformed product payload"), MOCK_PRODUCT])
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", return_value=MOCK_PRODUCT)
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data", return_value={"html": "<html>received</html>"})
+    def test_received_playwright_document_parser_failure_is_distinguished(self, playwright, scrapingbee, mapper):
+        with self.assertLogs("apps.importer.services.amazon_product", level="ERROR") as logs:
+            from .services.amazon_product import extract_amazon_product
+            extract_amazon_product("https://www.amazon.in/dp/B000000001")
+
+        output = "\n".join(logs.output)
+        self.assertIn("Playwright parse FAILED", output)
+        self.assertNotIn("Playwright FAILED", output)
+
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", return_value=MOCK_PRODUCT)
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data")
+    def test_validation_failure_is_logged_and_falls_back(self, playwright, scrapingbee):
+        playwright.return_value = {"product": {"title": "Example phone", "brand": "Example"}, "pricing": {}}
+
+        with self.assertLogs("apps.importer.services.amazon_product", level="INFO") as logs:
+            from .services.amazon_product import extract_amazon_product
+            extract_amazon_product("https://www.amazon.in/dp/B000000001")
+
+        output = "\n".join(logs.output)
+        self.assertIn("validation FAILED", output)
+        self.assertIn("missing_required=price", output)
+        self.assertIn("fallback → ScrapingBee", output)
+
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", side_effect=RuntimeError("HTTP 503 Service Unavailable"))
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data", side_effect=TimeoutError("navigation timeout"))
+    def test_both_provider_failures_have_combined_safe_error(self, playwright, scrapingbee):
+        from .services.amazon_product import extract_amazon_product
+        secret = "test-secret-api-key"
+
+        with self.assertRaises(RuntimeError) as raised:
+            with self.assertLogs("apps.importer.services.amazon_product", level="ERROR") as logs:
+                with patch.dict(os.environ, {"SCRAPINGBEE_API_KEY": secret}):
+                    extract_amazon_product("https://www.amazon.in/dp/B000000001")
+
+        message = str(raised.exception)
+        self.assertIn("Playwright", message)
+        self.assertIn("navigation timeout", message)
+        self.assertIn("ScrapingBee", message)
+        self.assertIn("HTTP 503", message)
+        self.assertNotIn(secret, message)
+        self.assertNotIn(secret, "\n".join(logs.output))
+
+    @patch("apps.importer.services.amazon_product.requests.get")
+    def test_scrapingbee_http_failure_retains_safe_response_diagnostics(self, request):
+        request.return_value = SimpleNamespace(
+            status_code=503,
+            reason="Service Unavailable",
+            headers={"content-type": "text/html"},
+            text="Robot Check",
+        )
+        from .services.amazon_product import AmazonProviderError, _extract_scrapingbee_product_data
+
+        with patch.dict(os.environ, {"SCRAPINGBEE_API_KEY": "secret-key"}):
+            with self.assertRaises(AmazonProviderError) as raised:
+                _extract_scrapingbee_product_data("https://www.amazon.in/dp/B000000001")
+
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(raised.exception.body_length, len("Robot Check"))
+        self.assertNotIn("secret-key", str(raised.exception))
+        request.assert_called_once()
+
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", side_effect=RuntimeError("HTTP 503 Service Unavailable"))
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data", side_effect=TimeoutError("navigation timeout"))
+    def test_failed_fallback_marks_product_failed(self, playwright, scrapingbee):
+        result = self.make_search_result(asin="B000000009")
+
+        with self.assertRaises(RuntimeError):
+            process_amazon_search_result(result)
+
+        product = AmazonProduct.objects.get(asin=result.asin)
+        self.assertEqual(product.status, ImportStatus.FAILED)
+        result.refresh_from_db()
+        self.assertFalse(result.processed)
+
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", return_value=MOCK_PRODUCT)
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data", side_effect=TimeoutError("navigation timeout"))
+    def test_successful_fallback_marks_product_completed(self, playwright, scrapingbee):
+        result = self.make_search_result(asin="B000000008")
+
+        self.assertTrue(process_amazon_search_result(result))
+
+        product = AmazonProduct.objects.get(asin=result.asin)
+        self.assertEqual(product.status, ImportStatus.COMPLETED)
+        result.refresh_from_db()
+        self.assertTrue(result.processed)
+
     @patch("apps.importer.management.commands.extract_amazon_products.process_amazon_search_result")
     def test_extract_command_limit(self, process_result):
         keyword = SearchKeyword.objects.create(keyword="iphone 16")

@@ -25,6 +25,14 @@ AMAZON_BLOCK_MARKERS = (
 class AmazonProductScrapingError(RuntimeError):
     """Raised when Amazon did not return a product document."""
 
+    def __init__(self, message, *, status=None, page_url="", page_title="", flags=None, stage="navigation"):
+        super().__init__(message)
+        self.status = status
+        self.page_url = page_url
+        self.page_title = page_title
+        self.flags = flags or {}
+        self.stage = stage
+
 
 # ============================================================
 # HELPERS
@@ -1082,11 +1090,28 @@ async def scrape_amazon(url, on_basic_data=None):
         print("Opening:", url)
 
         navigation_started = time.perf_counter()
-        response = await page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
+        try:
+            response = await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+        except Exception as exc:
+            page_url = getattr(page, "url", "") or ""
+            try:
+                page_title = await page.title()
+            except Exception:
+                page_title = ""
+            raise AmazonProductScrapingError(
+                str(exc), page_url=page_url, page_title=page_title,
+                flags={
+                    "captcha": "captcha" in str(exc).lower(),
+                    "robot_check": "robot check" in str(exc).lower(),
+                    "access_denied": "access denied" in str(exc).lower(),
+                    "download_response": "download is starting" in str(exc).lower(),
+                    "empty_page": False,
+                },
+            ) from exc
         mark("page_navigation", navigation_started)
 
         if response:
@@ -1102,8 +1127,23 @@ async def scrape_amazon(url, on_basic_data=None):
             marker in lower_html for marker in AMAZON_BLOCK_MARKERS
         ):
             raise AmazonProductScrapingError(
-                f"Amazon returned a blocked product document (HTTP {response_status})."
+                f"Amazon returned a blocked product document (HTTP {response_status}).",
+                status=response_status,
+                page_url=getattr(page, "url", "") or "",
+                page_title=await page.title(),
+                flags={
+                    "captcha": "captcha" in lower_html,
+                    "robot_check": "robot check" in lower_html,
+                    "access_denied": "access denied" in lower_html,
+                    "download_response": "download" in lower_html,
+                    "empty_page": not lower_html.strip(),
+                },
             )
+
+        logger.info(
+            "[AMAZON PRODUCT] Playwright page received url=%s status=%s html_length=%s",
+            getattr(page, "url", "") or url, response_status, len(html),
+        )
 
         # ====================================================
         # JSON-LD
@@ -1131,11 +1171,18 @@ async def scrape_amazon(url, on_basic_data=None):
         # ====================================================
 
         title_started = time.perf_counter()
-        product = await extract_product(
-            page,
-            product_ld,
-            html,
-        )
+        try:
+            product = await extract_product(
+                page,
+                product_ld,
+                html,
+            )
+        except Exception as exc:
+            raise AmazonProductScrapingError(
+                str(exc), status=response_status,
+                page_url=getattr(page, "url", "") or url,
+                page_title=await page.title(), stage="parse",
+            ) from exc
         mark("title", title_started)
 
         # ====================================================
