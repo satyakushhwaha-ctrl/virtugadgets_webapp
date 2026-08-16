@@ -395,6 +395,38 @@ class ImporterTests(TestCase):
         self.assertTrue(result.processed)
         self.assertEqual(extractor.call_count, 2)
 
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data")
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data")
+    def test_invalid_playwright_product_falls_back_to_scrapingbee(self, playwright, scrapingbee):
+        playwright.return_value = {
+            "product": {"asin": "B000000001", "title": "", "brand": ""},
+            "pricing": {},
+        }
+        scrapingbee.return_value = {
+            "product": {"asin": "B000000001", "title": "Fallback phone", "brand": "Example"},
+            "pricing": {"selling_price": 45000},
+        }
+
+        from .services.amazon_product import extract_amazon_product
+
+        result = extract_amazon_product("https://www.amazon.in/dp/B000000001")
+
+        self.assertEqual(result["product_title"], "Fallback phone")
+        playwright.assert_called_once()
+        scrapingbee.assert_called_once()
+
+    @patch("apps.importer.services.amazon_product.extract_amazon_product")
+    def test_invalid_product_data_never_completes(self, extractor):
+        extractor.return_value = {"product_title": "", "brand": "", "mrp_inr": None}
+        result = self.make_search_result()
+
+        with self.assertRaises(ValueError):
+            process_amazon_search_result(result)
+
+        product = AmazonProduct.objects.get(asin=result.asin)
+        self.assertEqual(product.status, ImportStatus.FAILED)
+        self.assertFalse(result.processed)
+
     @patch("apps.importer.management.commands.extract_amazon_products.process_amazon_search_result")
     def test_extract_command_limit(self, process_result):
         keyword = SearchKeyword.objects.create(keyword="iphone 16")

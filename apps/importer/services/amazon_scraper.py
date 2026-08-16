@@ -11,7 +11,19 @@ from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
 OPTIONAL_READ_TIMEOUT_MS = 1000
-REQUIRED_READY_TIMEOUT_MS = 750
+AMAZON_BLOCK_MARKERS = (
+    "captcha",
+    "robot check",
+    "enter the characters you see below",
+    "sorry, we just need to make sure you're not a robot",
+    "unusual traffic",
+    "access denied",
+    "download is starting",
+)
+
+
+class AmazonProductScrapingError(RuntimeError):
+    """Raised when Amazon did not return a product document."""
 
 
 # ============================================================
@@ -368,10 +380,18 @@ async def extract_discount(page):
 # PRODUCT
 # ============================================================
 
-async def extract_product(page, product_ld):
+async def extract_product(page, product_ld, html=""):
+    def static_element_text(element_id):
+        match = re.search(
+            rf'<[^>]+id=["\']{re.escape(element_id)}["\'][^>]*>(.*?)</',
+            html or "",
+            re.I | re.S,
+        )
+        return clean_text(re.sub(r"<[^>]+>", " ", match.group(1))) if match else None
+
     title = first_value(
         product_ld.get("name"),
-        await get_text(page, ["#productTitle"]),
+        static_element_text("productTitle"),
     )
 
     brand = None
@@ -384,7 +404,10 @@ async def extract_product(page, product_ld):
         brand = clean_text(ld_brand)
 
     if not brand:
-        brand = await get_text(page, ["#bylineInfo", "#brand", "[data-brand]"])
+        brand = first_value(
+            static_element_text("bylineInfo"),
+            static_element_text("brand"),
+        )
 
     description = clean_text(
         product_ld.get("description")
@@ -1069,22 +1092,18 @@ async def scrape_amazon(url, on_basic_data=None):
         if response:
             print("HTTP status:", response.status)
 
-        # Wait only for the primary identity element. JSON-LD/initial HTML can
-        # still supply the product when Amazon omits this element.
-        ready_started = time.perf_counter()
-        try:
-            await page.wait_for_selector(
-                "#productTitle",
-                state="attached",
-                timeout=REQUIRED_READY_TIMEOUT_MS,
-            )
-        except Exception:
-            logger.info("Amazon product title was not ready within %sms; continuing with structured HTML.", REQUIRED_READY_TIMEOUT_MS)
-        mark("page_ready", ready_started)
-
         html_started = time.perf_counter()
         html = await page.content()
         mark("html", html_started)
+
+        response_status = response.status if response else None
+        lower_html = html.lower()
+        if response_status in {403, 429, 503} or any(
+            marker in lower_html for marker in AMAZON_BLOCK_MARKERS
+        ):
+            raise AmazonProductScrapingError(
+                f"Amazon returned a blocked product document (HTTP {response_status})."
+            )
 
         # ====================================================
         # JSON-LD
@@ -1115,6 +1134,7 @@ async def scrape_amazon(url, on_basic_data=None):
         product = await extract_product(
             page,
             product_ld,
+            html,
         )
         mark("title", title_started)
 
