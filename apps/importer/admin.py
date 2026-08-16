@@ -1180,7 +1180,7 @@ class AmazonProductAdmin(ModelAdmin):
     @admin.action(description="Search Flipkart for selected products")
     def search_flipkart(self, request, queryset):
         queued = failed = 0
-        for amazon_product in queryset.iterator():
+        for amazon_product in queryset.iterator(chunk_size=100):
             try:
                 _queue_import_job(
                     request, flipkart_product_search_task,
@@ -1203,7 +1203,7 @@ class AmazonProductAdmin(ModelAdmin):
     @admin.action(description="Extract Best-Matched Flipkart Product")
     def extract_best_matched_flipkart_product(self, request, queryset):
         queued = failed = 0
-        for amazon_product in queryset.iterator():
+        for amazon_product in queryset.iterator(chunk_size=100):
             try:
                 _queue_import_job(
                     request, extract_best_matched_flipkart_product_task,
