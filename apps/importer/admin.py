@@ -7,6 +7,7 @@ from django.urls import path, reverse
 from django.template.response import TemplateResponse
 from django.utils import timezone
 from django.utils.html import format_html
+from unfold.admin import ModelAdmin
 
 from apps.categories.models import Category
 
@@ -77,7 +78,8 @@ def _compact_title(value, limit=64):
 
 
 def _queue_import_job(request, task, *, title, job_type, marketplace="", args=(),
-                      total_items=1, amazon_product=None, flipkart_product=None):
+                      total_items=1, amazon_product=None, flipkart_product=None,
+                      metadata=None):
     job = create_job(
         title=title,
         job_type=job_type,
@@ -86,6 +88,7 @@ def _queue_import_job(request, task, *, title, job_type, marketplace="", args=()
         created_by=request.user if getattr(request, "user", None) and request.user.is_authenticated else None,
         amazon_product=amazon_product,
         flipkart_product=flipkart_product,
+        metadata=metadata,
     )
     return enqueue_job(task=task, job=job, args=args)
 
@@ -278,7 +281,7 @@ class FlipkartSearchStatusFilter(admin.SimpleListFilter):
 
 
 @admin.register(ImportBatch)
-class ImportBatchAdmin(admin.ModelAdmin):
+class ImportBatchAdmin(ModelAdmin):
     change_form_template = "admin/importer/importbatch/change_form.html"
     list_display = (
         "short_id", "keyword", "status", "amazon_results_count",
@@ -427,9 +430,10 @@ class ImportBatchAdmin(admin.ModelAdmin):
 
 
 @admin.register(ImporterJob)
-class ImporterJobAdmin(admin.ModelAdmin):
+class ImporterJobAdmin(ModelAdmin):
     list_display = (
         "title", "job_type", "status_badge", "marketplace", "progress",
+        "search_sorting", "search_pages", "search_products_found",
         "success_count", "failed_count", "skipped_count", "created_at",
         "duration", "completed_at",
     )
@@ -454,6 +458,30 @@ class ImporterJobAdmin(admin.ModelAdmin):
     @admin.display(description="Progress")
     def progress(self, obj):
         return obj.progress_display
+
+    def _search_metadata(self, obj):
+        return obj.metadata if isinstance(obj.metadata, dict) else {}
+
+    @admin.display(description="Sorting")
+    def search_sorting(self, obj):
+        return self._search_metadata(obj).get("sorting") or "—"
+
+    @admin.display(description="Pages")
+    def search_pages(self, obj):
+        metadata = self._search_metadata(obj)
+        requested = metadata.get("requested_pages")
+        if requested is None and obj.job_type == ImporterJobType.AMAZON_SEARCH:
+            requested = obj.total_items
+        scraped = metadata.get("scraped_pages", obj.processed_items)
+        available = metadata.get("available_pages")
+        if requested is None:
+            return "—"
+        suffix = f" / {available} available" if available is not None else ""
+        return f"{scraped} / {requested}{suffix}"
+
+    @admin.display(description="Products found")
+    def search_products_found(self, obj):
+        return self._search_metadata(obj).get("products_found", obj.success_count) if obj.job_type == ImporterJobType.AMAZON_SEARCH else "—"
 
     @admin.display(description="Status", ordering="status")
     def status_badge(self, obj):
@@ -484,9 +512,11 @@ class ImporterJobAdmin(admin.ModelAdmin):
 
 
 @admin.register(SearchKeyword)
-class SearchKeywordAdmin(admin.ModelAdmin):
+class SearchKeywordAdmin(ModelAdmin):
     list_display = (
         "keyword",
+        "amazon_sorting_label",
+        "amazon_pages",
         "status",
         "total_results",
         "amazon_extraction_summary",
@@ -501,6 +531,12 @@ class SearchKeywordAdmin(admin.ModelAdmin):
     list_filter = ("status", FlipkartSearchStatusFilter, "matching_status")
     ordering = ("-created_at",)
     actions = ("run_amazon_search", "run_flipkart_search", "run_product_matching")
+
+    def save_model(self, request, obj, form, change):
+        obj.amazon_sorting_label = dict(SearchKeyword.AMAZON_SORTING_CHOICES).get(
+            obj.amazon_sorting, obj.amazon_sorting
+        )
+        super().save_model(request, obj, form, change)
 
     def _amazon_products(self, obj):
         return AmazonProduct.objects.filter(asin__in=obj.amazon_results.values("asin"))
@@ -600,6 +636,13 @@ class SearchKeywordAdmin(admin.ModelAdmin):
                     job_type=ImporterJobType.AMAZON_SEARCH,
                     marketplace=ImporterJobMarketplace.AMAZON,
                     args=(str(search_keyword.pk),),
+                    total_items=search_keyword.amazon_pages,
+                    metadata={
+                        "keyword": search_keyword.keyword,
+                        "sorting": search_keyword.amazon_sorting_label,
+                        "sorting_value": search_keyword.amazon_sorting,
+                        "requested_pages": search_keyword.amazon_pages,
+                    },
                 )
             except Exception as exc:
                 failed += 1
@@ -631,7 +674,7 @@ class SearchKeywordAdmin(admin.ModelAdmin):
 
 
 @admin.register(AmazonSearchResult)
-class AmazonSearchResultAdmin(admin.ModelAdmin):
+class AmazonSearchResultAdmin(ModelAdmin):
     list_display = ("asin", "title", "keyword", "position", "sponsored", "processed", "created_at")
     search_fields = ("asin", "title", "keyword__keyword")
     list_filter = ("processed", "sponsored")
@@ -658,7 +701,7 @@ class AmazonSearchResultAdmin(admin.ModelAdmin):
 
 
 @admin.register(FlipkartSearchResult)
-class FlipkartSearchResultAdmin(admin.ModelAdmin):
+class FlipkartSearchResultAdmin(ModelAdmin):
     list_display = ("search_keyword", "amazon_product", "pid", "title", "product_url", "processed", "created_at")
     search_fields = ("pid", "title", "amazon_product__asin", "amazon_product__product_title", "search_keyword__keyword")
     list_filter = ("processed", "sponsored")
@@ -697,7 +740,7 @@ class FlipkartProductAdminForm(forms.ModelForm):
 
 
 @admin.register(FlipkartProduct)
-class FlipkartProductAdmin(admin.ModelAdmin):
+class FlipkartProductAdmin(ModelAdmin):
     form = FlipkartProductAdminForm
     list_display = (
         "image_preview", "product_summary", "pid", "brand", "categories_display",
@@ -899,7 +942,7 @@ class FlipkartProductAdmin(admin.ModelAdmin):
 
 
 @admin.register(AmazonProduct)
-class AmazonProductAdmin(admin.ModelAdmin):
+class AmazonProductAdmin(ModelAdmin):
     form = AmazonProductAdminForm
     change_form_template = "admin/importer/amazonproduct/change_form.html"
     list_display = (
@@ -1232,7 +1275,7 @@ class ProductMatchBatchFilter(admin.SimpleListFilter):
 
 
 @admin.register(ProductMatch)
-class ProductMatchAdmin(admin.ModelAdmin):
+class ProductMatchAdmin(ModelAdmin):
     form = ProductMatchAdminForm
     change_form_template = "admin/importer/productmatch/change_form.html"
     list_display = (

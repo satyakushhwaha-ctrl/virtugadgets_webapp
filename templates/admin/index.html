@@ -1,69 +1,228 @@
-{% extends "admin/base_site.html" %}
-{% load i18n %}
+{% extends "admin/base.html" %}
+{% load i18n unfold static %}
+
+{% block title %}Operations Dashboard | {{ site_title }}{% endblock %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/dashboard.css' %}">
+{% endblock %}
 
 {% block content %}
 <div class="vg-dashboard">
-  <div class="vg-dashboard-heading">
+  <header class="vg-dashboard-heading">
     <div>
-      <p class="vg-eyebrow">Marketplace operations</p>
-      <h1>Good day, {{ user.get_short_name|default:user.username }}</h1>
-      <p class="vg-muted">Monitor catalog health, matching decisions, and background work from one place.</p>
+      <div class="vg-eyebrow flex items-center gap-2">
+        <span class="material-symbols-outlined">monitoring</span>
+        Marketplace operations
+      </div>
+      <h1>Operations Dashboard</h1>
+      <p class="vg-muted">Monitor VirtuGadgets catalog, marketplace imports, matching and background jobs from one place.</p>
     </div>
-    <a class="vg-primary-action" href="{% url 'admin:importer_importerjob_changelist' %}">Open job centre</a>
-  </div>
+    <div class="vg-dashboard-header-actions flex items-center gap-3 text-xs text-muted">
+      <span class="material-symbols-outlined text-base">schedule</span>
+      <span>Last updated {{ dashboard_updated_at|date:"M j, Y · H:i" }}</span>
+      <a class="vg-secondary-action" href="{% url 'admin:index' %}">Refresh</a>
+    </div>
+  </header>
 
   <section aria-labelledby="kpi-heading">
-    <h2 id="kpi-heading" class="vg-section-title">Overview</h2>
+    <div class="vg-section-header flex items-center justify-between">
+      <h2 id="kpi-heading" class="vg-section-title">Overview</h2>
+      <span class="text-xs text-muted">Live catalog and job totals</span>
+    </div>
     <div class="vg-kpi-grid">
-      {% for card in dashboard_cards %}
-        <a class="vg-kpi-card" href="{{ card.url }}">
-          <span>{{ card.label }}</span>
-          <strong>{{ card.count }}</strong>
-          <small>View details →</small>
+      {% for card in dashboard_kpis %}
+        <a href="{{ card.url }}" class="vg-kpi-card">
+          <div class="vg-kpi-icon-container" style="background-color: {{ card.icon_bg }};">
+            <span class="material-symbols-outlined" style="color: {{ card.icon_color }};">{{ card.icon }}</span>
+          </div>
+          <div class="vg-kpi-content">
+            <p class="vg-kpi-label">{{ card.label }}</p>
+            <p class="vg-kpi-value">{{ card.value }}</p>
+            <p class="vg-kpi-detail">{{ card.detail }}</p>
+          </div>
+          <span class="vg-kpi-action">View <span class="material-symbols-outlined text-xs align-middle">chevron_right</span></span>
         </a>
       {% endfor %}
     </div>
   </section>
 
   <div class="vg-dashboard-columns">
-    <section class="vg-panel" aria-labelledby="action-heading">
-      <div class="vg-panel-heading">
-        <div><p class="vg-eyebrow">Needs attention</p><h2 id="action-heading">Action required</h2></div>
-        <a href="{% url 'admin:importer_importerjob_changelist' %}?status=failed">View all</a>
+    {% component "unfold/components/card.html" with title="Action Required" icon="priority_high" title_class="vg-panel-title" %}
+      <div class="vg-panel-header flex items-center justify-between">
+        <span class="text-xs text-muted">Items that need an operator decision</span>
+        <span class="vg-badge">{{ failed_jobs_count|add:review_matches|add:unmatched_products }} total</span>
       </div>
-      {% for job in failed_jobs %}
-        <div class="vg-action-row">
-          <div><span class="vg-status vg-status-failed">FAILED</span><strong>{{ job.title }}</strong><p>{{ job.error_message|default:"The job failed without a reason."|truncatechars:130 }}</p></div>
-          <a href="{% url 'admin:importer_importerjob_change' job.pk %}">View</a>
-        </div>
-      {% empty %}
-        <p class="vg-empty-state">No failed jobs.</p>
-      {% endfor %}
-    </section>
-    <section class="vg-panel" aria-labelledby="review-heading">
-      <div class="vg-panel-heading">
-        <div><p class="vg-eyebrow">Human decision</p><h2 id="review-heading">Review required</h2></div>
-        <a href="{% url 'admin:importer_productmatch_changelist' %}?match_status=review">View all</a>
+      <div class="vg-action-list">
+        {% for item in action_items %}
+          {% if item.count %}
+            <div class="vg-action-row">
+              <div class="vg-action-icon-container" style="background-color: {{ item.icon_bg }};">
+                <span class="material-symbols-outlined" style="color: {{ item.icon_color }};">{{ item.icon }}</span>
+              </div>
+              <div class="vg-action-content">
+                <strong>{{ item.title }}</strong>
+                <p>{{ item.description }}</p>
+              </div>
+              <a href="{{ item.url }}" class="vg-action-link">{{ item.action }}</a>
+            </div>
+          {% endif %}
+        {% empty %}
+          <div class="vg-empty-state">Your catalog is healthy. Nothing requires attention.</div>
+        {% endfor %}
       </div>
-      {% for match in review_matches %}
-        <div class="vg-action-row">
-          <div><span class="vg-status vg-status-review">REVIEW</span><strong>{{ match.amazon_product.product_title|truncatechars:68 }}</strong><p>{{ match.amazon_product.asin }} · Score {{ match.score }}</p></div>
-          <a href="{% url 'admin:importer_productmatch_change' match.pk %}">Review</a>
+    {% endcomponent %}
+
+    {% component "unfold/components/card.html" with title="Import Activity" icon="sync" title_class="vg-panel-title" %}
+      {% if active_jobs %}
+        <div class="vg-activity-list">
+          {% for activity in active_jobs %}
+            <a href="{{ activity.url }}" class="vg-activity-item">
+              <div class="vg-activity-header flex items-center justify-between">
+                <span class="truncate font-medium">{{ activity.title }}</span>
+                <span class="vg-status-badge vg-status-{{ activity.status|lower }}">{{ activity.status }}</span>
+              </div>
+              <progress class="vg-progress-bar" max="100" value="{{ activity.progress }}">{{ activity.progress }}%</progress>
+              <div class="vg-activity-footer flex justify-between text-xs text-muted">
+                <span>{{ activity.progress_text }}</span>
+                <span>{{ activity.progress }}%</span>
+              </div>
+            </a>
+          {% endfor %}
         </div>
-      {% empty %}
-        <p class="vg-empty-state">No products are waiting for matching review.</p>
-      {% endfor %}
-    </section>
+      {% else %}
+        <div class="vg-empty-state-centered">
+          <div class="vg-empty-icon">
+            <span class="material-symbols-outlined">check_circle</span>
+          </div>
+          <div>
+            <p class="font-semibold">No active jobs</p>
+            <p class="text-xs text-muted mt-1">All background jobs are currently idle.</p>
+          </div>
+          <a href="{% url 'admin:importer_importerjob_changelist' %}" class="vg-empty-action">View jobs</a>
+        </div>
+      {% endif %}
+    {% endcomponent %}
   </div>
 
-  <section class="vg-panel vg-navigation-panel" aria-labelledby="navigation-heading">
-    <div class="vg-panel-heading"><div><p class="vg-eyebrow">Shortcuts</p><h2 id="navigation-heading">Operations</h2></div></div>
+  {% component "unfold/components/card.html" with title="Recent Jobs" icon="history" title_class="vg-panel-title" %}
+    {% if recent_jobs %}
+      <div class="vg-table-wrapper">
+        <table class="vg-table">
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Marketplace</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Products</th>
+              <th>Duration</th>
+              <th class="text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in recent_jobs %}
+              <tr>
+                <td class="max-w-[280px]">
+                  <a href="{{ row.url }}" class="vg-table-link">{{ row.title }}</a>
+                </td>
+                <td class="text-muted">{{ row.marketplace }}</td>
+                <td>
+                  <span class="vg-status-badge vg-status-{{ row.status_key }}">{{ row.status }}</span>
+                </td>
+                <td>
+                  <div class="vg-progress-cell">
+                    <progress class="vg-progress-bar" max="100" value="{{ row.progress }}">{{ row.progress }}%</progress>
+                    <span class="vg-progress-text">{{ row.progress }}%</span>
+                  </div>
+                </td>
+                <td class="text-muted">{{ row.products }}</td>
+                <td class="text-muted">{{ row.duration }}</td>
+                <td class="text-right">
+                  <a href="{{ row.url }}" class="vg-table-action">View</a>
+                  {% if row.status_key == 'failed' %}
+                    <span class="vg-table-separator">·</span>
+                    <a href="{{ row.url }}" class="vg-table-action">Retry</a>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="vg-empty-state">No recent jobs yet. Start an Amazon or Flipkart search to begin.</div>
+    {% endif %}
+  {% endcomponent %}
+
+  <div class="vg-dashboard-columns">
+    {% component "unfold/components/card.html" with title="Marketplace Overview" icon="public" title_class="vg-panel-title" %}
+      <div class="vg-marketplace-grid">
+        {% for marketplace in marketplace_overview %}
+          <a href="{{ marketplace.url }}" class="vg-marketplace-card">
+            <div class="vg-marketplace-header flex items-center gap-2">
+              <div class="vg-marketplace-icon-container" style="background-color: {{ marketplace.icon_bg }};">
+                <span class="material-symbols-outlined" style="color: {{ marketplace.icon_color }};">{{ marketplace.icon }}</span>
+              </div>
+              <h3 class="vg-marketplace-name">{{ marketplace.label }}</h3>
+            </div>
+            <p class="vg-marketplace-count">{{ marketplace.products }} <span class="text-xs font-normal text-muted">products</span></p>
+            <dl class="vg-marketplace-stats">
+              <div>
+                <dt class="text-muted">Search jobs</dt>
+                <dd class="font-semibold">{{ marketplace.search_jobs }}</dd>
+              </div>
+              <div>
+                <dt class="text-muted">Extraction jobs</dt>
+                <dd class="font-semibold">{{ marketplace.extraction_jobs }}</dd>
+              </div>
+              <div>
+                <dt class="text-muted">Failed jobs</dt>
+                <dd class="font-semibold {% if marketplace.failed_jobs %}text-red-600{% endif %}">{{ marketplace.failed_jobs }}</dd>
+              </div>
+            </dl>
+            <span class="vg-marketplace-action">View {{ marketplace.label }} <span class="material-symbols-outlined text-xs align-middle">chevron_right</span></span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endcomponent %}
+
+    {% component "unfold/components/card.html" with title="Catalog Health" icon="health_and_safety" title_class="vg-panel-title" %}
+      <div class="vg-health-list">
+        {% for metric in catalog_health %}
+          <div class="vg-health-item">
+            <div class="vg-health-header flex items-center justify-between">
+              <span class="vg-health-label flex items-center gap-2">
+                <span class="material-symbols-outlined text-muted">{{ metric.icon }}</span>
+                {{ metric.label }}
+              </span>
+              {% if metric.value != None %}
+                <strong>{{ metric.value }}%</strong>
+              {% else %}
+                <span class="text-xs text-muted">No data</span>
+              {% endif %}
+            </div>
+            {% if metric.value != None %}
+              <progress class="vg-progress-bar" max="100" value="{{ metric.value }}">{{ metric.value }}%</progress>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    {% endcomponent %}
+  </div>
+
+  {% component "unfold/components/card.html" with title="Quick Actions" icon="bolt" title_class="vg-panel-title" %}
     <div class="vg-shortcuts">
-      <a href="{% url 'admin:importer_amazonproduct_changelist' %}"><strong>Amazon products</strong><span>Catalog, pricing, extraction status</span></a>
-      <a href="{% url 'admin:importer_flipkartproduct_changelist' %}"><strong>Flipkart products</strong><span>Offers, availability, publishing</span></a>
-      <a href="{% url 'admin:importer_productmatch_changelist' %}"><strong>Product matches</strong><span>Compare and approve marketplace pairs</span></a>
-      <a href="{% url 'admin:importer_importbatch_changelist' %}"><strong>Import batches</strong><span>Run and review pipeline progress</span></a>
+      {% for action in quick_actions %}
+        <a href="{{ action.url }}" class="vg-shortcut">
+          <div class="vg-shortcut-icon-container">
+            <span class="material-symbols-outlined">{{ action.icon }}</span>
+          </div>
+          <span>{{ action.label }}</span>
+        </a>
+      {% endfor %}
     </div>
-  </section>
+  {% endcomponent %}
 </div>
 {% endblock %}

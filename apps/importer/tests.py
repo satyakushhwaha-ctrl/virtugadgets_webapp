@@ -46,6 +46,8 @@ from .services.flipkart_search_results import search_and_save_flipkart_candidate
 from .services.flipkart_search_results import run_flipkart_search_for_keyword
 from .services.amazon_search import search_amazon
 from .services.amazon_search import (
+    build_amazon_search_url,
+    DEFAULT_AMAZON_SORTING,
     PRODUCT_SELECTORS,
     AmazonBlockedPageError,
     AmazonNavigationError,
@@ -55,6 +57,7 @@ from .services.amazon_search import (
     _scrape_search_results_scrapingbee,
     _scrape_search_results,
 )
+from .services.amazon_search_results import run_amazon_search_for_keyword
 from .services.flipkart_product import (
     extract_flipkart_product,
     process_flipkart_search_result,
@@ -1222,6 +1225,122 @@ class AmazonPhasedExtractionTests(TransactionTestCase):
         self.assertEqual(product.current_selling_price_inr, 94999)
         self.assertEqual(product.mrp_inr, 119999)
         self.assertEqual(product.status, ImportStatus.FAILED)
+
+
+class AmazonSearchPaginationTests(TestCase):
+    def row(self, asin):
+        return {
+            "asin": asin,
+            "title": f"Product {asin}",
+            "product_url": f"https://www.amazon.in/dp/{asin}",
+            "position": 1,
+            "sponsored": False,
+        }
+
+    def test_sorting_url_generation(self):
+        expected = {
+            "relevanceblender": "relevanceblender",
+            "exact-aware-popularity-rank": "exact-aware-popularity-rank",
+            "date-desc-rank": "date-desc-rank",
+            "review-rank": "review-rank",
+            "price-desc-rank": "price-desc-rank",
+            "price-asc-rank": "price-asc-rank",
+        }
+        for value, encoded in expected.items():
+            url = build_amazon_search_url("laptops", value, 3)
+            self.assertIn("k=laptops", url)
+            self.assertIn(f"s={encoded}", url)
+            self.assertIn("page=3", url)
+
+    @patch("apps.importer.services.amazon_search_results.amazon_search.search_amazon_page")
+    def test_stops_at_last_page_and_completes_partial_request(self, search_page):
+        keyword = SearchKeyword.objects.create(keyword="laptops", amazon_pages=10, amazon_sorting="exact-aware-popularity-rank")
+        search_page.side_effect = [
+            {"results": [self.row(f"B0000000{index:02d}")], "has_next": index < 5}
+            for index in range(1, 6)
+        ]
+
+        summary = run_amazon_search_for_keyword(keyword)
+
+        self.assertEqual(search_page.call_count, 5)
+        self.assertEqual(summary.scraped_pages, 5)
+        self.assertEqual(summary.available_pages, 5)
+        self.assertIn("only 5 available pages", summary.reason)
+        self.assertEqual(keyword.amazon_results.count(), 5)
+        keyword.refresh_from_db()
+        self.assertEqual(keyword.status, ImportStatus.COMPLETED)
+
+    @patch("apps.importer.services.amazon_search_results.amazon_search.search_amazon_page")
+    def test_requested_page_limit_is_respected(self, search_page):
+        keyword = SearchKeyword.objects.create(keyword="laptops", amazon_pages=3)
+        search_page.return_value = {"results": [self.row("B000000001")], "has_next": True}
+
+        summary = run_amazon_search_for_keyword(keyword)
+
+        self.assertEqual(search_page.call_count, 3)
+        self.assertEqual(summary.scraped_pages, 3)
+        self.assertEqual(summary.requested_pages, 3)
+
+    @patch("apps.importer.services.amazon_search_results.amazon_search.search_amazon_page")
+    def test_empty_page_is_successful_end_of_results(self, search_page):
+        keyword = SearchKeyword.objects.create(keyword="laptops", amazon_pages=10)
+        search_page.side_effect = [
+            {"results": [self.row("B000000001")], "has_next": True},
+            {"results": [], "has_next": False},
+        ]
+
+        summary = run_amazon_search_for_keyword(keyword)
+
+        self.assertEqual(search_page.call_count, 2)
+        self.assertEqual(summary.scraped_pages, 1)
+        self.assertEqual(keyword.status, ImportStatus.COMPLETED)
+
+    @patch("apps.importer.services.amazon_search_results.amazon_search.search_amazon_page")
+    def test_network_failure_remains_failed(self, search_page):
+        keyword = SearchKeyword.objects.create(keyword="laptops", amazon_pages=3)
+        search_page.side_effect = RuntimeError("Amazon HTTP 503")
+
+        with self.assertRaises(RuntimeError):
+            run_amazon_search_for_keyword(keyword)
+
+        keyword.refresh_from_db()
+        self.assertEqual(keyword.status, ImportStatus.FAILED)
+
+    @patch("apps.importer.services.amazon_search_results.amazon_search.search_amazon_page")
+    def test_duplicate_asin_across_pages_is_not_created_twice(self, search_page):
+        keyword = SearchKeyword.objects.create(keyword="laptops", amazon_pages=2)
+        result = self.row("B000000001")
+        search_page.return_value = {"results": [result], "has_next": True}
+
+        summary = run_amazon_search_for_keyword(keyword)
+
+        self.assertEqual(search_page.call_count, 2)
+        self.assertEqual(keyword.amazon_results.count(), 1)
+        self.assertEqual(summary.saved, 1)
+
+    @patch("apps.importer.services.amazon_search._scrape_search_results")
+    def test_page_provider_passes_sorting_and_page_to_direct_provider(self, scrape):
+        scrape.return_value = {"results": [self.row("B000000001")], "has_next": False}
+        from .services.amazon_search import search_amazon_page
+
+        response = search_amazon_page("laptops", "price-asc-rank", 3)
+
+        scrape.assert_called_once_with("laptops", "price-asc-rank", 3, include_metadata=True)
+        self.assertIn("s=price-asc-rank", response["url"])
+        self.assertIn("page=3", response["url"])
+
+    @patch("apps.importer.services.amazon_search._scrape_search_results_scrapingbee")
+    @patch("apps.importer.services.amazon_search._scrape_search_results")
+    def test_page_provider_fallback_preserves_sorting_and_page(self, direct, fallback):
+        direct.side_effect = AmazonNavigationError("chrome-error")
+        fallback.return_value = {"results": [self.row("B000000001")], "has_next": False}
+        from .services.amazon_search import search_amazon_page
+
+        search_amazon_page("laptops", "price-asc-rank", 3)
+
+        fallback.assert_called_once_with(
+            "laptops", "price-asc-rank", 3, include_metadata=True
+        )
 
 
 class AmazonSearchBrowserDiagnosticsTests(SimpleTestCase):

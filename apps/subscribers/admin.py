@@ -1,10 +1,11 @@
 from django.contrib import admin
+from unfold.admin import ModelAdmin
 
 from apps.subscribers.models import Subscriber
 
 
 @admin.register(Subscriber)
-class SubscriberAdmin(admin.ModelAdmin):
+class SubscriberAdmin(ModelAdmin):
     list_display = ("email", "name", "phone", "is_active", "created_at")
     list_filter = ("is_active", "created_at")
     search_fields = ("email", "name", "phone")

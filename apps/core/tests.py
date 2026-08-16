@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.contrib.auth import get_user_model
 
 from apps.categories.models import Category
 from apps.products.models import Product, ProductPrice
@@ -124,6 +125,25 @@ class HomeViewTests(TestCase):
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
+
+
+class AdminDashboardTests(TestCase):
+    def test_unfold_operations_dashboard_renders_operator_sections(self):
+        user = get_user_model().objects.create_superuser(
+            username="dashboard-admin",
+            email="dashboard@example.com",
+            password="dashboard-password-123",
+        )
+        self.client.force_login(user)
+
+        response = self.client.get("/admin/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Operations Dashboard")
+        self.assertContains(response, "Action Required")
+        self.assertContains(response, "Recent Jobs")
+        self.assertContains(response, "Catalog Health")
+        self.assertContains(response, "Quick Actions")
 
 
 class ScrapingCeleryTaskTests(TestCase):

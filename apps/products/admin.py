@@ -1,5 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
+from unfold.admin import ModelAdmin
 
 from apps.products.models import Product, ProductPrice
 
@@ -19,7 +20,7 @@ class ProductPriceInline(admin.TabularInline):
 
 
 @admin.register(Product)
-class ProductAdmin(admin.ModelAdmin):
+class ProductAdmin(ModelAdmin):
     list_display = (
         "image_preview",
         "title",
@@ -74,7 +75,7 @@ class ProductAdmin(admin.ModelAdmin):
 
 
 @admin.register(ProductPrice)
-class ProductPriceAdmin(admin.ModelAdmin):
+class ProductPriceAdmin(ModelAdmin):
     list_display = (
         "product",
         "platform",

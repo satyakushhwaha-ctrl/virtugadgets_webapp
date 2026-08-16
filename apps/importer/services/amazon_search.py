@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 
 from django.core.exceptions import ValidationError
 import requests
@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 AMAZON_BASE_URL = "https://www.amazon.in"
 SEARCH_URL = f"{AMAZON_BASE_URL}/s?k={{keyword}}"
+DEFAULT_AMAZON_SORTING = "relevanceblender"
+
+
+def build_amazon_search_url(query: str, sort_value: str = DEFAULT_AMAZON_SORTING, page: int = 1) -> str:
+    """Build one canonical Amazon search URL for both providers."""
+    params = [("k", query.strip())]
+    if sort_value:
+        params.append(("s", sort_value))
+    if page:
+        params.append(("page", int(page)))
+    return f"{AMAZON_BASE_URL}/s?{urlencode(params)}"
 ASIN_PATTERN = re.compile(r"(?i)(?:/dp/|/gp/product/|/gp/aw/d/)([A-Z0-9]{10})")
 PRODUCT_SELECTORS = (
     "div[data-component-type='s-search-result']",
@@ -142,6 +153,20 @@ def _has_usable_search_document(page, response=None) -> bool:
         except Exception:
             continue
     return False
+
+
+def _is_empty_search_page(diagnostics: dict[str, str]) -> bool:
+    """Recognise a valid Amazon page which explicitly has no results."""
+    text = " ".join(
+        str(diagnostics.get(key, ""))
+        for key in ("title", "body_text", "html")
+    ).lower()
+    return any(marker in text for marker in (
+        "no results for",
+        "no results matching",
+        "did not match any products",
+        "no products found",
+    ))
 
 
 def _raise_navigation_error(
@@ -265,7 +290,30 @@ def _extract_asin(asin: str | None, href: str | None) -> str | None:
     return None
 
 
-def _parse_search_page(page, *, scroll: bool = True) -> list[dict]:
+def _has_next_page(page) -> bool:
+    """Return whether Amazon exposes an enabled next-results-page link."""
+    active_selectors = (
+        "li.s-pagination-next:not(.s-pagination-disabled) a",
+        "a.s-pagination-next:not([aria-disabled='true'])",
+        "a[aria-label*='Next' i]:not([aria-disabled='true'])",
+    )
+    disabled_selectors = (
+        "li.s-pagination-next.s-pagination-disabled",
+        "a.s-pagination-next[aria-disabled='true']",
+    )
+    try:
+        for selector in active_selectors:
+            if page.locator(selector).count():
+                return True
+        for selector in disabled_selectors:
+            if page.locator(selector).count():
+                return False
+    except Exception:
+        logger.debug("Could not inspect Amazon pagination controls", exc_info=True)
+    return False
+
+
+def _parse_search_page(page, *, scroll: bool = True, include_metadata: bool = False):
     """Parse Amazon search markup shared by all search providers."""
     if scroll:
         for _ in range(5):
@@ -279,24 +327,27 @@ def _parse_search_page(page, *, scroll: bool = True) -> list[dict]:
             products = candidate_products
             break
     if products is None:
-        return []
+        rows = []
+    else:
+        rows = []
+        for index in range(products.count()):
+            item = products.nth(index)
+            item_asin = item.get_attribute("data-asin")
+            link = item.locator("h2 a, a[href*='/dp/'], a[href*='/gp/product/']")
+            href = link.first.get_attribute("href") if link.count() else None
+            title = item.locator("h2 span, h2, a[href*='/dp/'], a[href*='/gp/product/']")
+            rows.append(
+                {
+                    "asin": item_asin,
+                    "title": title.first.inner_text().strip() if title.count() else "",
+                    "product_url": href,
+                    "position": index + 1,
+                    "sponsored": "sponsored" in item.inner_text().lower(),
+                }
+            )
 
-    rows = []
-    for index in range(products.count()):
-        item = products.nth(index)
-        item_asin = item.get_attribute("data-asin")
-        link = item.locator("h2 a, a[href*='/dp/'], a[href*='/gp/product/']")
-        href = link.first.get_attribute("href") if link.count() else None
-        title = item.locator("h2 span, h2, a[href*='/dp/'], a[href*='/gp/product/']")
-        rows.append(
-            {
-                "asin": item_asin,
-                "title": title.first.inner_text().strip() if title.count() else "",
-                "product_url": href,
-                "position": index + 1,
-                "sponsored": "sponsored" in item.inner_text().lower(),
-            }
-        )
+    if include_metadata:
+        return {"results": rows, "has_next": bool(rows) and _has_next_page(page)}
     return rows
 
 
@@ -306,7 +357,13 @@ def _scrapingbee_api_key() -> str:
     return os.getenv("SCRAPINGBEE_API_KEY", "").strip()
 
 
-def _scrape_search_results_scrapingbee(keyword: str) -> list[dict]:
+def _scrape_search_results_scrapingbee(
+    keyword: str,
+    sort_value: str | None = None,
+    page_number: int | None = None,
+    *,
+    include_metadata: bool = False,
+):
     """Fetch Amazon search HTML through ScrapingBee and use the same parser."""
     from playwright.sync_api import sync_playwright
     from .playwright import is_headless
@@ -317,7 +374,11 @@ def _scrape_search_results_scrapingbee(keyword: str) -> list[dict]:
             "Amazon search fallback is unavailable: SCRAPINGBEE_API_KEY is not configured."
         )
 
-    requested_url = SEARCH_URL.format(keyword=quote_plus(keyword))
+    requested_url = (
+        build_amazon_search_url(keyword, sort_value or DEFAULT_AMAZON_SORTING, page_number or 1)
+        if sort_value is not None or page_number is not None
+        else SEARCH_URL.format(keyword=quote_plus(keyword))
+    )
     logger.info("Amazon search fallback starting: provider=scrapingbee url=%s", requested_url)
     try:
         response = requests.get(
@@ -365,21 +426,27 @@ def _scrape_search_results_scrapingbee(keyword: str) -> list[dict]:
         page = context.new_page()
         try:
             page.set_content(html, wait_until="domcontentloaded", timeout=30000)
-            rows = _parse_search_page(page, scroll=False)
+            rows = _parse_search_page(page, scroll=False, include_metadata=include_metadata)
         finally:
             page.close()
             context.close()
             browser.close()
 
-    if not rows:
+    if not rows and not include_metadata:
         raise AmazonSearchSelectorError(
             "ScrapingBee returned valid HTML but Amazon search selectors were not found."
         )
-    logger.info("Amazon search parser: provider=scrapingbee results=%s", len(rows))
+    logger.info("Amazon search parser: provider=scrapingbee results=%s", len(rows.get("results", rows) if isinstance(rows, dict) else rows))
     return rows
 
 
-def _scrape_search_results(keyword: str) -> list[dict]:
+def _scrape_search_results(
+    keyword: str,
+    sort_value: str | None = None,
+    page_number: int | None = None,
+    *,
+    include_metadata: bool = False,
+):
     """Scrape Amazon using the project's existing Playwright behaviour."""
     # Keep Playwright lazy so Django checks and unit tests do not require a
     # browser installation unless a real search is actually requested.
@@ -392,7 +459,11 @@ def _scrape_search_results(keyword: str) -> list[dict]:
         browser = None
         context = None
         page = None
-        requested_url = SEARCH_URL.format(keyword=quote_plus(keyword))
+        requested_url = (
+            build_amazon_search_url(keyword, sort_value or DEFAULT_AMAZON_SORTING, page_number or 1)
+            if sort_value is not None or page_number is not None
+            else SEARCH_URL.format(keyword=quote_plus(keyword))
+        )
         navigation_attempts = 3
         try:
             browser = playwright.chromium.launch(
@@ -474,9 +545,25 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                         _raise_unexpected_page(page, keyword, diagnostics)
                     combined_selector = ", ".join(PRODUCT_SELECTORS)
                     try:
-                        page.wait_for_selector(combined_selector, timeout=30000)
+                        page.wait_for_selector(
+                            combined_selector,
+                            timeout=30000 if not include_metadata else 3000,
+                        )
                     except PlaywrightTimeoutError as exc:
                         diagnostics = _page_diagnostics(page)
+                        normal_document = (
+                            not _is_chrome_error_url(diagnostics["url"])
+                            and "<html" in diagnostics["html"].lower()
+                            and not _blocking_reason(diagnostics)
+                        )
+                        if include_metadata and normal_document and _is_empty_search_page(diagnostics):
+                            logger.info(
+                                "Amazon search page has no results: page=%s url=%s",
+                                page_number or 1,
+                                requested_url,
+                            )
+                            navigation_ready = True
+                            break
                         _raise_unexpected_page(page, keyword, diagnostics, cause=exc)
                     navigation_ready = True
                     break
@@ -543,7 +630,7 @@ def _scrape_search_results(keyword: str) -> list[dict]:
                 if attempt < navigation_attempts:
                     time.sleep(attempt)
 
-            rows = _parse_search_page(page)
+            rows = _parse_search_page(page, include_metadata=include_metadata)
             if not rows:
                 diagnostics = _page_diagnostics(page)
                 _raise_unexpected_page(page, keyword, diagnostics)
@@ -612,3 +699,70 @@ def search_amazon(keyword: str) -> list[dict]:
         )
 
     return normalised
+
+
+def search_amazon_page(keyword: str, sort_value: str, page_number: int) -> dict:
+    """Fetch one sorted Amazon page, retaining pagination/provider metadata."""
+    if not isinstance(keyword, str) or not keyword.strip():
+        raise ValidationError("Amazon search keyword cannot be empty.")
+    if not sort_value:
+        sort_value = DEFAULT_AMAZON_SORTING
+    if int(page_number) < 1:
+        raise ValidationError("Amazon search page must be at least 1.")
+
+    provider = os.getenv("AMAZON_SEARCH_PROVIDER", "auto").strip().lower() or "auto"
+    if provider not in {"auto", "playwright", "scrapingbee"}:
+        raise ValidationError("AMAZON_SEARCH_PROVIDER must be auto, playwright, or scrapingbee.")
+    normalised_keyword = keyword.strip()
+    try:
+        if provider == "scrapingbee":
+            payload = _scrape_search_results_scrapingbee(
+                normalised_keyword, sort_value, int(page_number), include_metadata=True
+            )
+            used_provider = "scrapingbee"
+        else:
+            try:
+                payload = _scrape_search_results(
+                    normalised_keyword, sort_value, int(page_number), include_metadata=True
+                )
+                used_provider = "playwright"
+            except (AmazonNavigationError, AmazonBlockedPageError) as exc:
+                if provider == "playwright":
+                    raise
+                logger.warning(
+                    "Amazon Playwright search failed; falling back to ScrapingBee: reason=%s",
+                    str(exc)[:500],
+                )
+                payload = _scrape_search_results_scrapingbee(
+                    normalised_keyword, sort_value, int(page_number), include_metadata=True
+                )
+                used_provider = "scrapingbee"
+    except AmazonSearchSelectorError:
+        raise
+
+    raw_results = payload.get("results", payload) if isinstance(payload, dict) else payload
+    results = []
+    seen_asins = set()
+    for result in raw_results or []:
+        asin = _extract_asin(result.get("asin"), result.get("product_url"))
+        product_url = _normalise_amazon_url(result.get("product_url"), asin)
+        if not asin or not product_url or asin in seen_asins:
+            continue
+        seen_asins.add(asin)
+        results.append({
+            "asin": asin,
+            "title": (result.get("title") or "").strip(),
+            "product_url": product_url,
+            "position": result.get("position") or len(results) + 1,
+            "sponsored": bool(result.get("sponsored", False)),
+        })
+    logger.info(
+        "Amazon search page completed: provider=%s page=%s results=%s has_next=%s",
+        used_provider, page_number, len(results), bool(payload.get("has_next")) if isinstance(payload, dict) else False,
+    )
+    return {
+        "results": results,
+        "has_next": bool(payload.get("has_next")) if isinstance(payload, dict) else False,
+        "source": used_provider,
+        "url": build_amazon_search_url(normalised_keyword, sort_value, int(page_number)),
+    }

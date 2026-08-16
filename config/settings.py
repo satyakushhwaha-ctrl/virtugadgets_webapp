@@ -87,7 +87,7 @@ if not DEBUG:
 
 # Applications
 INSTALLED_APPS = [
-    'jazzmin',
+    'unfold',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -103,72 +103,92 @@ INSTALLED_APPS = [
 ]
 
 
-# Jazzmin themes the existing Django admin; all model registrations and
+# Unfold themes the existing Django admin; all model registrations and
 # workflows continue to come from the project's current ModelAdmin classes.
-JAZZMIN_SETTINGS = {
-    "site_title": "VirtuGadgets Operations",
-    "site_header": "VirtuGadgets",
-    "site_brand": "VirtuGadgets",
-    "welcome_sign": "Marketplace operations console",
-    "copyright": "VirtuGadgets",
-    "show_sidebar": True,
-    "navigation_expanded": False,
-    "hide_models": ["auth.Group"],
-    "search_model": [
-        "importer.AmazonProduct",
-        "importer.FlipkartProduct",
-        "importer.ProductMatch",
-        "importer.ImporterJob",
-    ],
-    "order_with_respect_to": [
-        "products",
-        "importer",
-        "categories",
-        "subscribers",
-        "auth",
-    ],
-    "icons": {
-        "products.Product": "fas fa-box-open",
-        "importer.AmazonProduct": "fab fa-amazon",
-        "importer.FlipkartProduct": "fas fa-store",
-        "importer.ProductMatch": "fas fa-code-compare",
-        "importer.ImporterJob": "fas fa-list-check",
-        "importer.ImportBatch": "fas fa-layer-group",
-        "importer.SearchKeyword": "fas fa-magnifying-glass",
-        "importer.AmazonSearchResult": "fab fa-amazon",
-        "importer.FlipkartSearchResult": "fas fa-store",
-        "products.ProductPrice": "fas fa-tags",
-        "categories.Category": "fas fa-folder-tree",
-        "auth.User": "fas fa-user",
-        "auth.Group": "fas fa-users",
-    },
-    "topmenu_links": [
-        {"name": "Operations dashboard", "url": "admin:index", "permissions": ["auth.view_user"]},
-    ],
-    "related_modal_active": True,
-    "changeform_format": "horizontal_tabs",
-}
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
 
-JAZZMIN_UI_TWEAKS = {
-    # Keep Jazzmin's bundled AdminLTE styling as the baseline. This also
-    # avoids requiring a collected Bootswatch manifest for admin previews.
-    "theme": "default",
-    "dark_mode_theme": None,
-    "navbar_small_text": False,
-    "body_small_text": False,
-    "footer_small_text": False,
-    "sidebar_nav_small_text": False,
-    "sidebar_disable_expand": False,
-    "sidebar_nav_child_indent": True,
-    "navbar_fixed": True,
-    "sidebar_fixed": True,
-    "button_classes": {
-        "primary": "btn-primary",
-        "secondary": "btn-outline-secondary",
-        "info": "btn-info",
-        "warning": "btn-warning",
-        "danger": "btn-danger",
-        "success": "btn-success",
+UNFOLD = {
+    "SITE_TITLE": "VirtuGadgets Admin",
+    "SITE_HEADER": "VirtuGadgets",
+    "SITE_SUBHEADER": "Marketplace Operations",
+    "SITE_URL": "/",
+    "DASHBOARD_CALLBACK": "apps.core.admin.dashboard_callback",
+    "SHOW_LANGUAGES": False,
+    "COMMAND": {
+        "search_models": True,
+        "show_history": True,
+    },
+    "COLORS": {
+        "primary": {
+            "50": "#eff6ff",
+            "100": "#dbeafe",
+            "200": "#bfdbfe",
+            "300": "#93c5fd",
+            "400": "#60a5fa",
+            "500": "#2563eb",
+            "600": "#1d4ed8",
+            "700": "#1e40af",
+            "800": "#1e3a8a",
+            "900": "#172554",
+            "950": "#0f172a",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": _("Dashboard"),
+                "separator": True,
+                "items": [
+                    {"title": _("Operations dashboard"), "icon": "dashboard", "link": reverse_lazy("admin:index")},
+                ],
+            },
+            {
+                "title": _("Catalog"),
+                "separator": True,
+                "items": [
+                    {"title": _("Products"), "icon": "inventory_2", "link": reverse_lazy("admin:products_product_changelist")},
+                    {"title": _("Amazon Products"), "icon": "shopping_cart", "link": reverse_lazy("admin:importer_amazonproduct_changelist")},
+                    {"title": _("Flipkart Products"), "icon": "storefront", "link": reverse_lazy("admin:importer_flipkartproduct_changelist")},
+                    {"title": _("Product Matches"), "icon": "compare_arrows", "link": reverse_lazy("admin:importer_productmatch_changelist")},
+                    {"title": _("Categories"), "icon": "category", "link": reverse_lazy("admin:categories_category_changelist")},
+                ],
+            },
+            {
+                "title": _("Discovery"),
+                "separator": True,
+                "items": [
+                    {"title": _("Search Keywords"), "icon": "search", "link": reverse_lazy("admin:importer_searchkeyword_changelist")},
+                    {"title": _("Amazon Search Results"), "icon": "travel_explore", "link": reverse_lazy("admin:importer_amazonsearchresult_changelist")},
+                    {"title": _("Flipkart Search Results"), "icon": "manage_search", "link": reverse_lazy("admin:importer_flipkartsearchresult_changelist")},
+                ],
+            },
+            {
+                "title": _("Operations"),
+                "separator": True,
+                "items": [
+                    {"title": _("Importer Jobs"), "icon": "pending_actions", "link": reverse_lazy("admin:importer_importerjob_changelist")},
+                    {"title": _("Import Batches"), "icon": "layers", "link": reverse_lazy("admin:importer_importbatch_changelist")},
+                ],
+            },
+            {
+                "title": _("Pricing"),
+                "separator": True,
+                "items": [
+                    {"title": _("Product Prices"), "icon": "sell", "link": reverse_lazy("admin:products_productprice_changelist")},
+                ],
+            },
+            {
+                "title": _("System"),
+                "separator": True,
+                "items": [
+                    {"title": _("Users"), "icon": "group", "link": reverse_lazy("admin:auth_user_changelist")},
+                    {"title": _("Groups"), "icon": "groups", "link": reverse_lazy("admin:auth_group_changelist")},
+                ],
+            },
+        ],
     },
 }
 

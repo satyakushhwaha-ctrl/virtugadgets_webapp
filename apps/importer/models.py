@@ -1,6 +1,7 @@
 import uuid
 
 from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 
 from apps.categories.models import Category
@@ -79,7 +80,31 @@ class MatchConfidence(models.TextChoices):
 
 
 class SearchKeyword(models.Model):
+    AMAZON_SORTING_CHOICES = (
+        ("relevanceblender", "Featured / Relevance"),
+        ("exact-aware-popularity-rank", "Best Seller"),
+        ("date-desc-rank", "New Arrivals"),
+        ("review-rank", "Avg. Customer Review"),
+        ("price-desc-rank", "Price: High to Low"),
+        ("price-asc-rank", "Price: Low to High"),
+    )
+
     keyword = models.CharField(max_length=255, unique=True)
+    amazon_pages = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Maximum number of Amazon result pages to request.",
+    )
+    amazon_sorting = models.CharField(
+        max_length=64,
+        choices=AMAZON_SORTING_CHOICES,
+        default="relevanceblender",
+    )
+    amazon_sorting_label = models.CharField(
+        max_length=100,
+        default="Featured / Relevance",
+        editable=False,
+    )
 
     status = models.CharField(
         max_length=20,

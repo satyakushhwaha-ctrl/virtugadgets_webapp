@@ -68,13 +68,61 @@ def amazon_search_task(self, search_keyword_id, job_id=None):
         keyword = SearchKeyword.objects.get(pk=search_keyword_id)
     except SearchKeyword.DoesNotExist:
         return _missing_job(job_id, title=f"Amazon Search — {search_keyword_id}", job_type=ImporterJobType.AMAZON_SEARCH, marketplace=ImporterJobMarketplace.AMAZON, reason="SearchKeyword not found.")
-    job = _job_for_task(job_id, title=f"Amazon Search — {keyword.keyword}", job_type=ImporterJobType.AMAZON_SEARCH, marketplace=ImporterJobMarketplace.AMAZON)
+    job = _job_for_task(
+        job_id,
+        title=f"Amazon Search — {keyword.keyword}",
+        job_type=ImporterJobType.AMAZON_SEARCH,
+        marketplace=ImporterJobMarketplace.AMAZON,
+        total_items=max(1, int(keyword.amazon_pages or 1)),
+    )
     _start_job(job)
     try:
         summary = run_amazon_search_for_keyword(keyword)
-        update_job_progress(job, processed_items=1, success_count=1, result_message=f"Search returned {summary.results_found} results; saved {summary.saved}.")
+        requested_pages = getattr(summary, "requested_pages", max(1, int(keyword.amazon_pages or 1)))
+        scraped_pages = getattr(summary, "scraped_pages", 1)
+        available_pages = getattr(summary, "available_pages", requested_pages)
+        sorting = getattr(summary, "sorting", keyword.amazon_sorting_label)
+        sorting_value = getattr(summary, "sorting_value", keyword.amazon_sorting)
+        reason = getattr(summary, "reason", "")
+        products_found = getattr(summary, "total_results", summary.saved)
+        result_message = reason or (
+            f"Search completed across {scraped_pages} page(s); "
+            f"found {summary.results_found} results and saved {summary.saved}."
+        )
+        job.metadata = {
+            **(job.metadata if isinstance(job.metadata, dict) else {}),
+            "keyword": keyword.keyword,
+            "sorting": sorting,
+            "sorting_value": sorting_value,
+            "requested_pages": requested_pages,
+            "available_pages": available_pages,
+            "scraped_pages": scraped_pages,
+            "products_found": products_found,
+        }
+        job.save(update_fields=["metadata", "updated_at"])
+        update_job_progress(
+            job,
+            total_items=requested_pages,
+            processed_items=scraped_pages,
+            success_count=products_found,
+            result_message=result_message,
+        )
         mark_job_completed(job, job.result_message)
-        return {"status": "completed", "id": str(keyword.pk), "job_id": str(job.pk), "results_found": summary.results_found, "saved": summary.saved}
+        return {
+            "status": "completed",
+            "id": str(keyword.pk),
+            "job_id": str(job.pk),
+            "keyword": keyword.keyword,
+            "sorting": sorting,
+            "sorting_value": sorting_value,
+            "requested_pages": requested_pages,
+            "available_pages": available_pages,
+            "scraped_pages": scraped_pages,
+            "products_found": products_found,
+            "results_found": summary.results_found,
+            "saved": summary.saved,
+            "status_reason": reason,
+        }
     except Exception as exc:
         _handle_failure(self, job, exc, f"Amazon search for {keyword.keyword}")
 
