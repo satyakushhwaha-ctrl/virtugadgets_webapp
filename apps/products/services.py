@@ -9,6 +9,7 @@ from django.utils.html import conditional_escape
 from django.utils.safestring import mark_safe
 
 from apps.importer.models import AmazonProduct, FlipkartProduct, ProductMatch
+from apps.importer.services.product_matching import classify_product_type
 
 from .models import Product, ProductPrice
 
@@ -271,7 +272,7 @@ def build_product_detail_context(
         getattr(amazon_source, "highlights", []),
         list_value=True,
     ) if amazon_source else []
-    amazon_specifications = _build_amazon_specifications(amazon_source) if amazon_source else []
+    amazon_specifications = _build_amazon_specifications(amazon_source, product=product) if amazon_source else []
     description = amazon_description or product.short_description or product.description
     seo_description = (description or f"Compare prices for {product.title}.")[:160]
 
@@ -312,45 +313,102 @@ def _clean_detail_values(value, *, list_value=False):
     return "" if result.casefold() in {"none", "null", "{}", "[]"} else result
 
 
-def _build_amazon_specifications(amazon_product) -> list[dict[str, str]]:
+_SPECIFICATION_ALIASES = {
+    "model": ("item model number", "model", "model name", "model number"),
+    "processor": ("processor", "processor name", "cpu"),
+    "processor generation": ("processor generation", "cpu generation", "generation"),
+    "ram": ("ram", "ram size", "ram memory installed size", "memory"),
+    "storage": ("storage", "hard drive", "storage capacity", "ssd", "internal storage"),
+    "storage type": ("storage type", "hard disk description", "hard disk type", "storage technology"),
+    "graphics": ("graphics", "graphics coprocessor", "gpu", "graphics card"),
+    "display size": ("display size", "standing screen display size", "screen size"),
+    "screen size": ("screen size", "display size", "standing screen display size"),
+    "resolution": ("resolution", "display resolution", "screen resolution"),
+    "display resolution": ("display resolution", "resolution", "screen resolution"),
+    "operating system": ("operating system", "os"),
+    "battery": ("battery", "battery capacity", "battery power", "cell type"),
+    "battery capacity": ("battery capacity", "battery", "battery power"),
+    "weight": ("weight", "item weight", "product weight"),
+    "rear camera": ("rear camera", "primary camera", "main camera", "camera"),
+    "front camera": ("front camera", "secondary camera", "selfie camera"),
+    "5g / network": ("5g", "network", "connectivity", "cellular technology", "wireless communication technology"),
+    "sim type": ("sim type", "sim card", "sim card slot count"),
+    "connectivity": ("connectivity", "wireless communication technology", "communication technology"),
+    "display technology": ("display technology", "panel type", "screen technology"),
+    "refresh rate": ("refresh rate", "refresh rate (hz)"),
+    "hdr": ("hdr", "high dynamic range"),
+    "hdmi": ("hdmi", "hdmi ports"),
+    "usb": ("usb", "usb ports"),
+    "compatibility": ("compatibility", "compatible devices"),
+    "connector": ("connector", "connector type"),
+    "interface": ("interface", "interface type"),
+    "material": ("material", "body material"),
+    "color": ("color", "colour"),
+    "dimensions": ("dimensions", "product dimensions"),
+    "power": ("power", "wattage", "power source"),
+    "cable length": ("cable length", "length"),
+    "warranty": ("warranty", "manufacturer warranty"),
+}
+
+_SPECIFICATION_PRIORITIES = {
+    "laptop": ("Brand", "Model", "Processor", "Processor Generation", "RAM", "Storage", "Storage Type", "Graphics", "Display Size", "Display Resolution", "Operating System", "Battery", "Weight"),
+    "smartphone": ("Brand", "Model", "RAM", "Storage", "Display Size", "Display Resolution", "Processor", "Rear Camera", "Front Camera", "Battery Capacity", "Operating System", "5G / Network", "SIM Type", "Color"),
+    "tablet": ("Brand", "Model", "RAM", "Storage", "Display Size", "Display Resolution", "Processor", "Battery", "Operating System", "Connectivity"),
+    "tv": ("Brand", "Model", "Screen Size", "Resolution", "Display Technology", "Refresh Rate", "HDR", "Operating System", "Connectivity", "HDMI", "USB"),
+    "accessory": ("Brand", "Model", "Compatibility", "Connector", "Interface", "Material", "Color", "Dimensions", "Weight", "Power", "Cable Length", "Warranty"),
+}
+_GENERIC_SPECIFICATIONS = ("Brand", "Model", "Processor", "RAM", "Storage", "Display Size", "Graphics", "Operating System", "Battery", "Connectivity", "Weight")
+
+
+def _spec_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _display_specification_values(amazon_product) -> dict[str, str]:
+    raw = getattr(amazon_product, "specifications", {}) or {}
+    values = {_spec_key(key): value for key, value in raw.items()}
+    structured = {
+        "brand": getattr(amazon_product, "brand", ""),
+        "processor": getattr(amazon_product, "processor", ""),
+        "ram": getattr(amazon_product, "ram", ""),
+        "storage": getattr(amazon_product, "storage", ""),
+        "operating system": getattr(amazon_product, "operating_system", ""),
+        "display size": getattr(amazon_product, "display_size", ""),
+        "resolution": getattr(amazon_product, "resolution", ""),
+        "color": getattr(amazon_product, "color", ""),
+        "weight": f"{getattr(amazon_product, 'weight_kg', '')} kg" if getattr(amazon_product, "weight_kg", None) else "",
+    }
+    for key, value in structured.items():
+        if _clean_detail_values(value):
+            values[key] = value
+    return values
+
+
+def _build_amazon_specifications(amazon_product, *, product=None) -> list[dict[str, str]]:
     if amazon_product is None:
         return []
-    fields = (
-        ("Brand", "brand"),
-        ("Model", "product_title"),
-        ("RAM", "ram"),
-        ("Storage", "storage"),
-        ("Processor", "processor"),
-        ("Operating system", "operating_system"),
-        ("Display size", "display_size"),
-        ("Resolution", "resolution"),
-        ("Color", "color"),
-        ("Weight", "weight_kg"),
-        ("Software", "software"),
-        ("Warranty", "warranty"),
-        ("Seller", "primary_seller"),
-        ("Availability", "availability"),
-        ("MRP", "mrp_inr"),
-        ("Selling price", "current_selling_price_inr"),
-        ("Minimum price", "selling_price_min_inr"),
-        ("Maximum price", "selling_price_max_inr"),
+    category_name = getattr(getattr(product, "category", None), "name", "")
+    product_text = " ".join(
+        str(value or "") for value in (
+            getattr(amazon_product, "product_title", ""),
+            getattr(amazon_product, "brand", ""),
+            category_name,
+        )
     )
+    product_type = classify_product_type(product_text)
+    labels = _SPECIFICATION_PRIORITIES.get(product_type, _GENERIC_SPECIFICATIONS)
+    values = _display_specification_values(amazon_product)
+    aliases = {_spec_key(key): names for key, names in _SPECIFICATION_ALIASES.items()}
     specifications = []
     seen = set()
-    for label, field in fields:
-        value = _clean_detail_values(getattr(amazon_product, field, ""))
-        if field == "weight_kg" and value:
-            value = f"{value} kg"
-        elif field in {"mrp_inr", "current_selling_price_inr", "selling_price_min_inr", "selling_price_max_inr"} and value:
-            value = f"₹{value}"
-        if value:
-            specifications.append({"label": label, "value": value})
-            seen.add(label.casefold())
-    for key, value in (getattr(amazon_product, "specifications", {}) or {}).items():
-        label = _clean_detail_values(key)
-        display_value = _clean_detail_values(value)
-        if label and display_value and label.casefold() not in seen:
-            specifications.append({"label": label, "value": display_value})
+    for label in labels:
+        lookup_names = (label,) + aliases.get(_spec_key(label), ())
+        value = next((values.get(_spec_key(name)) for name in lookup_names if _clean_detail_values(values.get(_spec_key(name)))), "")
+        value = _clean_detail_values(value)
+        if not value or label.casefold() in seen:
+            continue
+        specifications.append({"label": label, "value": value})
+        seen.add(label.casefold())
     return specifications
 
 

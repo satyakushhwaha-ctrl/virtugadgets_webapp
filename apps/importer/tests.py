@@ -288,6 +288,30 @@ class ImporterTests(TestCase):
         self.assertEqual(float(product.weight_kg), 1.34)
         self.assertEqual(product.approval_status, "pending")
 
+    def test_amazon_brand_normalization_removes_store_link_text(self):
+        from .services.amazon_product import _map_amazon_product_response
+        from .services.amazon_scraper import normalize_amazon_brand
+
+        self.assertEqual(normalize_amazon_brand("Visit the Samsung Store"), "Samsung")
+        self.assertEqual(normalize_amazon_brand("Visit the Apple Store"), "Apple")
+        self.assertEqual(normalize_amazon_brand("Samsung Store"), "Samsung")
+        self.assertEqual(normalize_amazon_brand("Store Brand"), "Store Brand")
+
+        mapped = _map_amazon_product_response({
+            "product": {"title": "Phone", "brand": "Visit the Samsung Store"},
+            "pricing": {"selling_price": 100},
+        }, "https://www.amazon.in/dp/B000000001")
+        self.assertEqual(mapped["brand"], "Samsung")
+
+    def test_json_ld_brand_remains_unchanged(self):
+        from .services.amazon_product import _map_amazon_product_response
+
+        mapped = _map_amazon_product_response({
+            "product": {"title": "Phone", "brand": "Samsung"},
+            "pricing": {"selling_price": 100},
+        }, "https://www.amazon.in/dp/B000000001")
+        self.assertEqual(mapped["brand"], "Samsung")
+
     @patch("apps.importer.services.amazon_search._scrape_search_results")
     def test_search_service_normalises_and_deduplicates_response(self, scraper):
         scraper.return_value = [
@@ -427,6 +451,103 @@ class ImporterTests(TestCase):
         self.assertEqual(product.status, ImportStatus.FAILED)
         self.assertFalse(result.processed)
 
+    @patch("apps.importer.services.amazon_product.extract_amazon_product")
+    def test_title_and_brand_without_price_or_mrp_never_completes(self, extractor):
+        extractor.return_value = {
+            "product_title": "Title only product",
+            "brand": "Example",
+            "images": ["https://images.example/product.jpg"],
+            "current_selling_price_inr": None,
+            "mrp_inr": None,
+        }
+        result = self.make_search_result(asin="B000000007")
+
+        with self.assertRaises(ValueError):
+            process_amazon_search_result(result)
+
+        self.assertEqual(AmazonProduct.objects.get(asin=result.asin).status, ImportStatus.FAILED)
+
+    def test_quality_report_keeps_images_optional_but_price_required(self):
+        from .services.amazon_product import build_amazon_product_quality_report
+
+        report = build_amazon_product_quality_report({
+            "product_title": "Example",
+            "brand": "Brand",
+            "current_selling_price_inr": 100,
+            "images": [],
+        })
+
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["missing_required"], [])
+        self.assertIn("images", report["missing_important"])
+
+    def test_quality_report_requires_selling_price_or_mrp(self):
+        from .services.amazon_product import build_amazon_product_quality_report
+
+        report = build_amazon_product_quality_report({
+            "product_title": "Example",
+            "brand": "Brand",
+        })
+
+        self.assertFalse(report["valid"])
+        self.assertEqual(report["missing_required"], ["price_or_mrp"])
+
+    def test_static_image_normalization_rejects_empty_placeholder_and_captcha_images(self):
+        from .services.amazon_product import _normalise_static_images
+
+        images = _normalise_static_images([
+            "",
+            "https://images.example/placeholder.jpg",
+            "https://images.example/captcha.jpg",
+            "https://images.example/pixel.gif",
+            "https://images.example/product._SX679_.jpg",
+            "https://images.example/product._SX679_.jpg",
+        ])
+
+        self.assertEqual(images, ["https://images.example/product.jpg"])
+
+    def test_static_scrapingbee_parser_reads_split_amazon_price_and_images(self):
+        from .services.amazon_product import _static_html_product, _map_amazon_product_response
+
+        html = """
+        <script type="application/ld+json">
+        {"@type":"Product","name":"Static phone","brand":{"name":"Example"},"sku":"B000000005"}
+        </script>
+        <div id="corePriceDisplay_desktop_feature_div">
+          <span class="a-price"><span class="a-price-whole">1,299</span><span class="a-price-fraction">00</span></span>
+        </div>
+        <div id="altImages"><img data-old-hires="https://images.example/product._SX679_.jpg"></div>
+        """
+
+        mapped = _map_amazon_product_response(
+            _static_html_product("https://www.amazon.in/dp/B000000005", html),
+            "https://www.amazon.in/dp/B000000005",
+        )
+
+        self.assertEqual(mapped["current_selling_price_inr"], 1299)
+        self.assertEqual(mapped["images"], ["https://images.example/product.jpg"])
+
+    @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data")
+    @patch("apps.importer.services.amazon_product.extract_amazon_product_data")
+    def test_fallback_merges_non_empty_provider_values(self, playwright, scrapingbee):
+        playwright.return_value = {
+            "product": {"asin": "B000000006", "title": "Playwright title", "brand": "Playwright brand"},
+            "pricing": {},
+        }
+        scrapingbee.return_value = {
+            "product": {"asin": "B000000006", "title": "", "brand": ""},
+            "pricing": {"selling_price": 499},
+            "images": ["https://images.example/fallback.jpg"],
+        }
+
+        from .services.amazon_product import extract_amazon_product
+        result = extract_amazon_product("https://www.amazon.in/dp/B000000006")
+
+        self.assertEqual(result["product_title"], "Playwright title")
+        self.assertEqual(result["brand"], "Playwright brand")
+        self.assertEqual(result["current_selling_price_inr"], 499)
+        self.assertEqual(result["images"], ["https://images.example/fallback.jpg"])
+
     @patch("apps.importer.services.amazon_product._extract_scrapingbee_product_data", return_value=MOCK_PRODUCT)
     @patch("apps.importer.services.amazon_product.extract_amazon_product_data", side_effect=TimeoutError("navigation timeout"))
     def test_playwright_navigation_failure_is_logged_before_successful_fallback(self, playwright, scrapingbee):
@@ -462,7 +583,7 @@ class ImporterTests(TestCase):
             extract_amazon_product("https://www.amazon.in/dp/B000000001")
 
         output = "\n".join(logs.output)
-        self.assertIn("validation FAILED", output)
+        self.assertIn("validation=failed", output)
         self.assertIn("missing_required=price", output)
         self.assertIn("fallback → ScrapingBee", output)
 

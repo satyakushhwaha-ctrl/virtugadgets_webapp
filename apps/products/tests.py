@@ -13,7 +13,7 @@ from apps.categories.models import Category
 from apps.importer.models import AmazonProduct, ImportStatus
 from apps.products.management.commands.seed_products import PRODUCTS
 from apps.products.models import Product, ProductPrice
-from apps.products.services import build_product_card
+from apps.products.services import _build_amazon_specifications, build_product_card
 
 
 class ProductModelTests(TestCase):
@@ -246,7 +246,7 @@ class ProductDetailViewTests(TestCase):
             url="https://www.amazon.in/dp/B0DETAILTEST",
             description="AI smartphone with a 200MP camera.",
             highlights=["S Pen included", "Long battery life"],
-            specifications={"Camera": "200 MP", "Connectivity": "5G"},
+            specifications={"Camera": "200 MP", "Connectivity": "5G", "Manufacturer": "Samsung Electronics"},
             ram="12GB",
             storage="256GB",
             processor="Snapdragon 8 Elite",
@@ -264,11 +264,85 @@ class ProductDetailViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         for value in (
-            "Samsung Galaxy S25 Ultra", "12GB", "256GB", "Snapdragon 8 Elite",
+            "iPhone 14 128GB", "12GB", "256GB", "Snapdragon 8 Elite",
             "Android 15", "6.9 inch", "Titanium Gray", "AI smartphone with a 200MP camera.",
             "S Pen included", "200 MP", "5G",
         ):
             self.assertContains(response, value)
+        self.assertNotContains(response, "Samsung Electronics")
+        self.assertNotContains(response, "Manufacturer")
+
+    def test_laptop_specifications_are_curated_and_raw_data_is_preserved(self) -> None:
+        amazon = AmazonProduct(
+            product_title="Lenovo ThinkPad Laptop",
+            brand="Lenovo",
+            processor="Intel Core i5-1335U",
+            ram="16 GB",
+            storage="512 GB SSD",
+            operating_system="Windows 11",
+            specifications={
+                "Item model number": "21T9005VIG",
+                "Graphics Coprocessor": "Intel Iris Xe",
+                "Standing screen display size": "14 Inches",
+                "Manufacturer": "Lenovo Group Limited",
+                "Country of Origin": "China",
+                "Date First Available": "2024",
+                "ASIN": "B0RAW",
+            },
+        )
+
+        specifications = _build_amazon_specifications(amazon)
+        labels = [item["label"] for item in specifications]
+
+        self.assertEqual(
+            labels,
+            ["Brand", "Model", "Processor", "RAM", "Storage", "Graphics", "Display Size", "Operating System"],
+        )
+        self.assertNotIn("Manufacturer", labels)
+        self.assertNotIn("ASIN", labels)
+        self.assertEqual(amazon.specifications["Manufacturer"], "Lenovo Group Limited")
+
+    def test_phone_specifications_use_phone_fields_only(self) -> None:
+        amazon = AmazonProduct(
+            product_title="Samsung Galaxy S25 Smartphone",
+            brand="Samsung",
+            ram="12 GB",
+            storage="256 GB",
+            specifications={
+                "Display Size": "6.8 Inches",
+                "Resolution": "3120 x 1440",
+                "Processor": "Snapdragon",
+                "Rear Camera": "200 MP",
+                "Front Camera": "12 MP",
+                "Battery Capacity": "5000 mAh",
+                "Operating System": "Android",
+                "5G": "5G",
+                "Manufacturer": "Samsung Electronics",
+            },
+        )
+
+        labels = [item["label"] for item in _build_amazon_specifications(amazon)]
+
+        self.assertIn("Rear Camera", labels)
+        self.assertIn("Front Camera", labels)
+        self.assertIn("Battery Capacity", labels)
+        self.assertNotIn("Manufacturer", labels)
+        self.assertNotIn("Graphics", labels)
+
+    def test_empty_and_unknown_specifications_are_hidden_from_details(self) -> None:
+        amazon = AmazonProduct(
+            product_title="Generic product",
+            brand="Example",
+            specifications={
+                "Manufacturer": "Example Inc",
+                "Internal unknown field": "internal",
+                "RAM": "",
+            },
+        )
+
+        specifications = _build_amazon_specifications(amazon)
+
+        self.assertEqual(specifications, [{"label": "Brand", "value": "Example"}])
 
     def test_product_information_precedes_overview_on_detail_page(self) -> None:
         response = self.client.get(

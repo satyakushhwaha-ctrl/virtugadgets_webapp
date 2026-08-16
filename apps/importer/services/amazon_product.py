@@ -11,8 +11,9 @@ import logging
 import os
 import re
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from html import unescape
+from urllib.parse import urlparse
 import requests
 
 from asgiref.sync import sync_to_async
@@ -20,7 +21,13 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import AmazonProduct, AmazonSearchResult, ImportStatus
-from .amazon_scraper import scrape_amazon
+from .amazon_scraper import (
+    clean_price,
+    is_valid_amazon_image,
+    normalize_amazon_brand,
+    scrape_amazon,
+    upgrade_amazon_image,
+)
 from .jobs import concise_error_message
 
 
@@ -103,6 +110,84 @@ def _diagnostic_reason(flags):
     return ", ".join(name.replace("_", " ") for name, present in flags.items() if present) or "none detected"
 
 
+def _quality_present(value):
+    return value not in (None, "", [], {})
+
+
+def _quality_price_present(value):
+    if not _quality_present(value):
+        return False
+    try:
+        return Decimal(str(value).replace(",", "")) > 0
+    except (TypeError, ValueError, InvalidOperation):
+        return False
+
+
+def build_amazon_product_quality_report(data):
+    """Return one quality report used by both providers and persistence."""
+    fields = {
+        "title": bool(str(data.get("product_title") or "").strip()),
+        "brand": bool(str(data.get("brand") or "").strip()),
+        "selling_price": _quality_price_present(data.get("current_selling_price_inr")),
+        "mrp": _quality_price_present(data.get("mrp_inr")),
+        "images": bool(data.get("images")),
+        "seller": bool(str(data.get("primary_seller") or "").strip()),
+        "availability": bool(str(data.get("availability") or "").strip()),
+        "specifications": bool(data.get("specifications")),
+        "highlights": bool(data.get("highlights")),
+    }
+    missing_required = [
+        "title" if not fields["title"] else None,
+        "brand" if not fields["brand"] else None,
+        "price_or_mrp" if not (fields["selling_price"] or fields["mrp"]) else None,
+    ]
+    missing_important = [
+        field for field in ("images", "seller", "availability", "specifications", "highlights")
+        if not fields[field]
+    ]
+    return {
+        "valid": not any(missing_required),
+        "missing_required": [field for field in missing_required if field],
+        "missing_important": missing_important,
+        "fields": fields,
+    }
+
+
+def _log_quality(asin, provider, report):
+    fields = report["fields"]
+    logger.info(
+        "[AMAZON PRODUCT] quality asin=%s provider=%s title=%s brand=%s price=%s mrp=%s "
+        "images=%s seller=%s availability=%s specifications=%s highlights=%s",
+        asin, provider,
+        *("yes" if fields[field] else "no" for field in (
+            "title", "brand", "selling_price", "mrp", "images", "seller",
+            "availability", "specifications", "highlights",
+        )),
+    )
+
+
+def _merge_product_data(primary, fallback):
+    """Merge provider fields without replacing valid values with empty ones."""
+    merged = dict(primary or {})
+    for field, fallback_value in (fallback or {}).items():
+        primary_value = merged.get(field)
+        if field == "images":
+            values = []
+            for value in (primary_value or []) + (fallback_value or []):
+                if value and value not in values:
+                    values.append(value)
+            if values:
+                merged[field] = values
+        elif field == "specifications":
+            values = dict(fallback_value or {})
+            values.update({key: value for key, value in (primary_value or {}).items() if _quality_present(value)})
+            if values:
+                merged[field] = values
+        elif not _quality_present(primary_value) and _quality_present(fallback_value):
+            merged[field] = fallback_value
+    return merged
+
+
 def _log_playwright_failure(asin, url, exc, *, stage=None):
     flags = getattr(exc, "flags", None) or _page_flags(str(exc))
     logger.error(
@@ -160,6 +245,53 @@ def _json_ld_product(html):
     return {}
 
 
+def _normalise_static_images(values):
+    images = []
+    rejected = ("placeholder", "transparent", "spacer", "pixel", "captcha", "robot-check")
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        value = unescape(value).strip()
+        if not value.startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(value)
+        lower = f"{parsed.path}?{parsed.query}".lower()
+        if not is_valid_amazon_image(value) or any(marker in lower for marker in rejected):
+            continue
+        value = upgrade_amazon_image(value)
+        if value and value not in images:
+            images.append(value)
+    return images
+
+
+def _static_price_values(fragment):
+    values = []
+    for match in re.finditer(
+        r'class=["\'][^"\']*a-price-whole[^"\']*["\'][^>]*>\s*([\d,]+)',
+        fragment or "", re.I,
+    ):
+        value = clean_price(match.group(1))
+        if value is not None:
+            values.append(value)
+    for match in re.finditer(r'(?:₹|INR)\s*([\d,]+(?:\.\d+)?)', fragment or "", re.I):
+        value = clean_price(match.group(1))
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _static_price_from_context(html, markers):
+    lower = (html or "").lower()
+    for marker in markers:
+        start = lower.find(marker.lower())
+        if start < 0:
+            continue
+        values = _static_price_values(html[max(0, start - 500):start + 5000])
+        if values:
+            return values[0]
+    return None
+
+
 def _static_html_product(url, html):
     """Parse the ScrapingBee document without waiting for client-side DOM."""
     product_ld = _json_ld_product(html)
@@ -183,18 +315,35 @@ def _static_html_product(url, html):
     offers = offers if isinstance(offers, dict) else {}
     selling_price = offers.get("price")
     if selling_price is None:
-        match = re.search(r'(?:₹|INR)\s*([\d,]+(?:\.\d+)?)', html or "", re.I)
-        selling_price = match.group(1).replace(",", "") if match else None
-    mrp_match = re.search(r'(?:M\.R\.P\.|MRP)[^₹\d]{0,30}(?:₹|INR)?\s*([\d,]+(?:\.\d+)?)', html or "", re.I)
+        selling_price = _static_price_from_context(
+            html,
+            ("priceToPay", "priceblock_dealprice", "priceblock_ourprice", "corePriceDisplay", "buybox"),
+        )
+    else:
+        selling_price = clean_price(selling_price)
+    mrp = _static_price_from_context(
+        html,
+        ("basisPrice", "a-text-price", "listPrice", "priceblock_listprice", "M.R.P."),
+    )
     image = product_ld.get("image", [])
     if isinstance(image, str):
         image = [image]
+    image_values = list(image) if isinstance(image, list) else []
+    for match in re.finditer(r'data-old-hires=["\']([^"\']+)', html or "", re.I):
+        image_values.append(match.group(1))
+    for match in re.finditer(r'(?:src|data-src)=["\']([^"\']+)', html or "", re.I):
+        if "amazon" in match.group(1).lower() and ("images" in match.group(1).lower() or "media" in match.group(1).lower()):
+            image_values.append(match.group(1))
     return {
         "url": url,
         "asin": product_ld.get("sku") or product_ld.get("mpn") or "",
-        "product": {"asin": product_ld.get("sku", ""), "title": _html_text(title), "brand": _html_text(brand)},
-        "pricing": {"selling_price": selling_price, "mrp": mrp_match.group(1).replace(",", "") if mrp_match else None},
-        "images": image if isinstance(image, list) else [],
+        "product": {
+            "asin": product_ld.get("sku", ""),
+            "title": _html_text(title),
+            "brand": normalize_amazon_brand(_html_text(brand)),
+        },
+        "pricing": {"selling_price": selling_price, "mrp": mrp},
+        "images": _normalise_static_images(image_values),
     }
 
 
@@ -307,10 +456,10 @@ def _map_amazon_product_response(raw, url: str) -> dict:
     return {
         "asin": asin,
         "product_title": _value(product, "title", "product_title") or raw.get("product_title", ""),
-        "brand": _value(product, "brand") or raw.get("brand", ""),
+        "brand": normalize_amazon_brand(_value(product, "brand") or raw.get("brand", "")),
         "url": raw.get("url") or url,
         "availability": _value(availability, "status") or raw.get("availability", ""),
-        "images": raw.get("images") or [],
+        "images": _normalise_static_images(raw.get("images") or []),
         "description": _value(product, "description") or raw.get("description", ""),
         "highlights": raw.get("highlights") or [],
         "specifications": specifications,
@@ -353,6 +502,7 @@ def extract_amazon_product(url: str, on_basic_data=None) -> dict:
         attempts.append("scrapingbee")
     outcomes = []
     provider_errors = []
+    partial_data = None
     for current_provider in attempts:
         asin = _asin_from_url(url)
         logger.info("[AMAZON PRODUCT] asin=%s provider=%s", asin, current_provider)
@@ -372,8 +522,12 @@ def extract_amazon_product(url: str, on_basic_data=None) -> dict:
                     diagnostics.get("content_type") or "<unknown>",
                 )
             mapped = _map_amazon_product_response(raw, url)
-            missing = validate_amazon_product_data(mapped)
-            if missing:
+            mapped = _merge_product_data(partial_data, mapped) if partial_data else mapped
+            partial_data = mapped
+            report = build_amazon_product_quality_report(mapped)
+            _log_quality(asin, current_provider, report)
+            if not report["valid"]:
+                missing = report["missing_required"]
                 outcome = {
                     "provider": current_provider, "success": False, "stage": "validation",
                     "missing_required": missing,
@@ -381,8 +535,8 @@ def extract_amazon_product(url: str, on_basic_data=None) -> dict:
                 outcomes.append(outcome)
                 provider_errors.append(ValueError(_provider_summary(outcome)))
                 logger.error(
-                    "[AMAZON PRODUCT] validation FAILED provider=%s asin=%s missing_required=%s",
-                    current_provider, asin, ",".join(missing),
+                    "[AMAZON PRODUCT] validation=failed asin=%s missing_required=%s missing_important=%s",
+                    asin, ",".join(missing), ",".join(report["missing_important"]) or "none",
                 )
                 if current_provider == "playwright" and "scrapingbee" in attempts:
                     logger.info("[AMAZON PRODUCT] fallback → ScrapingBee asin=%s", asin)
@@ -434,14 +588,8 @@ def extract_amazon_product(url: str, on_basic_data=None) -> dict:
 
 
 def validate_amazon_product_data(data):
-    missing = []
-    if not (data.get("product_title") or "").strip():
-        missing.append("title")
-    if not (data.get("brand") or "").strip():
-        missing.append("brand")
-    if data.get("current_selling_price_inr") is None and data.get("mrp_inr") is None:
-        missing.append("price")
-    return missing
+    """Compatibility helper returning required failures from the central report."""
+    return build_amazon_product_quality_report(data)["missing_required"]
 
 
 _EXTRACTED_FIELDS = (
@@ -505,12 +653,15 @@ def process_amazon_search_result(search_result: AmazonSearchResult, on_basic_dat
             search_result.product_url,
             on_basic_data=save_basic_data,
         )
-        missing = validate_amazon_product_data(data)
-        if missing:
+        report = build_amazon_product_quality_report(data)
+        _log_quality(asin, "persistence", report)
+        if not report["valid"]:
+            missing = report["missing_required"]
             logger.info(
-                "[AMAZON PRODUCT] asin=%s validation=failed missing=%s",
+                "[AMAZON PRODUCT] validation=failed asin=%s missing_required=%s missing_important=%s",
                 asin,
                 ",".join(missing),
+                ",".join(report["missing_important"]) or "none",
             )
             raise ValueError(f"Amazon product data is incomplete: {', '.join(missing)}")
         extracted_asin = (data.get("asin") or asin).strip().upper()

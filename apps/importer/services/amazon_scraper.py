@@ -46,6 +46,18 @@ def clean_text(value):
     return value or None
 
 
+def normalize_amazon_brand(value):
+    """Normalize Amazon store-link labels without altering real brand names."""
+    value = clean_text(re.sub(r"<[^>]+>", " ", str(value or ""))) or ""
+    visit_match = re.match(r"^visit(?:\s+the)?\s+(.+?)\s+store$", value, re.IGNORECASE)
+    if visit_match:
+        return clean_text(visit_match.group(1)) or ""
+    store_match = re.match(r"^(.+?)\s+store$", value, re.IGNORECASE)
+    if store_match:
+        return clean_text(store_match.group(1)) or ""
+    return value
+
+
 def clean_price(value):
     if value is None:
         return None
@@ -397,20 +409,19 @@ async def extract_product(page, product_ld, html=""):
         )
         return clean_text(re.sub(r"<[^>]+>", " ", match.group(1))) if match else None
 
+    ld_brand = None
+    raw_ld_brand = product_ld.get("brand")
+    if isinstance(raw_ld_brand, dict):
+        ld_brand = clean_text(raw_ld_brand.get("name"))
+    elif isinstance(raw_ld_brand, str):
+        ld_brand = clean_text(raw_ld_brand)
+
     title = first_value(
         product_ld.get("name"),
         static_element_text("productTitle"),
     )
-
-    brand = None
-
-    ld_brand = product_ld.get("brand")
-
-    if isinstance(ld_brand, dict):
-        brand = clean_text(ld_brand.get("name"))
-    elif isinstance(ld_brand, str):
-        brand = clean_text(ld_brand)
-
+    brand_source = "jsonld" if ld_brand else "selector"
+    brand = ld_brand
     if not brand:
         brand = first_value(
             static_element_text("bylineInfo"),
@@ -423,7 +434,8 @@ async def extract_product(page, product_ld, html=""):
 
     return {
         "title": title,
-        "brand": brand,
+        "brand": normalize_amazon_brand(brand),
+        "brand_source": brand_source,
         "description": description,
     }
 
@@ -776,6 +788,15 @@ def upgrade_amazon_image(url):
     return url
 
 
+def is_valid_amazon_image(url):
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return False
+    lower = url.lower()
+    return not any(marker in lower for marker in (
+        "placeholder", "transparent", "spacer", "pixel", "captcha", "robot-check",
+    ))
+
+
 async def extract_images(page, product_ld):
     images = []
 
@@ -810,7 +831,7 @@ async def extract_images(page, product_ld):
                 if not src:
                     continue
 
-                if (
+                if is_valid_amazon_image(src) and (
                     "images-amazon.com" in src
                     or "media-amazon.com" in src
                 ):
@@ -824,6 +845,7 @@ async def extract_images(page, product_ld):
     return unique_list(
         upgrade_amazon_image(image)
         for image in images
+        if is_valid_amazon_image(image)
     )
 
 
@@ -1255,11 +1277,12 @@ async def scrape_amazon(url, on_basic_data=None):
         mark("specifications", specifications_started)
 
         # Brand fallback
-        if not product["brand"]:
-            product["brand"] = first_value(
+        specification_brand = first_value(
                 specifications.get("Brand Name"),
                 specifications.get("Brand"),
             )
+        if product.get("brand_source") != "jsonld" and specification_brand:
+            product["brand"] = normalize_amazon_brand(specification_brand)
 
         # ====================================================
         # DELIVERY
