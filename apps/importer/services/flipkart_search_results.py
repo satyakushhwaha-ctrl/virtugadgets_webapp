@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 from urllib.parse import quote_plus
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -15,7 +16,11 @@ from ..models import (
     ImportStatus,
     SearchKeyword,
 )
-from .flipkart_search import build_flipkart_search_queries, search_flipkart
+from .flipkart_search import (
+    build_flipkart_search_queries,
+    search_flipkart,
+    search_flipkart_page,
+)
 
 
 MAX_CANDIDATES_PER_PRODUCT = 10
@@ -37,6 +42,11 @@ class FlipkartSearchSummary:
     skipped_duplicates: int
     attempts: tuple[FlipkartSearchAttempt, ...] = ()
     candidate_pids: tuple[str, ...] = ()
+    requested_pages: int = 1
+    available_pages: int = 1
+    scraped_pages: int = 1
+    reason: str = ""
+    request_costs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,6 +59,11 @@ class KeywordFlipkartSearchSummary:
     saved: int
     skipped_duplicates: int
     failed_products: tuple[str, ...] = ()
+    requested_pages: int = 1
+    available_pages: int = 1
+    scraped_pages: int = 1
+    reason: str = ""
+    request_costs: tuple[str, ...] = ()
 
 
 def search_and_save_flipkart_candidates(
@@ -217,14 +232,66 @@ def search_and_save_flipkart_candidates_for_keyword(
         search_keyword.keyword,
         query,
     )
-    logger.info("Opening Flipkart search URL for keyword query: %s", query)
-    candidates = search_flipkart(query)
-    return _save_flipkart_candidates(
+    requested_pages = max(1, int(search_keyword.amazon_pages or 1))
+    all_candidates = []
+    request_costs = []
+    scraped_pages = 0
+    available_pages = requested_pages
+    reason = ""
+    for page_number in range(1, requested_pages + 1):
+        logger.info(
+            "[FLIPKART SEARCH] keyword=%s page=%s/%s",
+            query, page_number, requested_pages,
+        )
+        if requested_pages == 1 and not getattr(settings, "SCRAPEDO_API_TOKEN", "").strip():
+            page_payload = {
+                "results": search_flipkart(query),
+                "has_next": False,
+            }
+        else:
+            page_payload = search_flipkart_page(query, page_number)
+        page_candidates = page_payload.get("results", [])
+        if page_payload.get("request_cost") is not None:
+            request_costs.append(str(page_payload["request_cost"]))
+        if not page_candidates:
+            available_pages = max(0, page_number - 1)
+            reason = (
+                f"Requested {requested_pages} pages, but only {available_pages} "
+                "pages were available."
+            )
+            break
+        all_candidates.extend(page_candidates)
+        scraped_pages += 1
+        has_next = bool(page_payload.get("has_next"))
+        if page_number < requested_pages and not has_next:
+            available_pages = page_number
+            reason = (
+                f"Requested {requested_pages} pages, but only {available_pages} "
+                "pages were available."
+            )
+            break
+        available_pages = page_number if not has_next else requested_pages
+
+    summary = _save_flipkart_candidates(
         search_keyword=search_keyword,
-        candidates=candidates,
+        candidates=all_candidates,
         selected_query=query,
         candidate_limit=candidate_limit,
-        attempts=(FlipkartSearchAttempt(query, len(candidates)),),
+        attempts=(FlipkartSearchAttempt(query, len(all_candidates)),),
+    )
+    return FlipkartSearchSummary(
+        query=summary.query,
+        candidates_found=summary.candidates_found,
+        candidates_selected=summary.candidates_selected,
+        saved=summary.saved,
+        skipped_duplicates=summary.skipped_duplicates,
+        attempts=summary.attempts,
+        candidate_pids=summary.candidate_pids,
+        requested_pages=requested_pages,
+        available_pages=available_pages,
+        scraped_pages=scraped_pages,
+        reason=reason,
+        request_costs=tuple(request_costs),
     )
 
 
@@ -306,6 +373,11 @@ def run_flipkart_search_for_keyword(
             saved=summary.saved,
             skipped_duplicates=summary.skipped_duplicates,
             failed_products=(),
+            requested_pages=summary.requested_pages,
+            available_pages=summary.available_pages,
+            scraped_pages=summary.scraped_pages,
+            reason=summary.reason,
+            request_costs=summary.request_costs,
         )
     except Exception as exc:
         batch.status = BatchStatus.FAILED

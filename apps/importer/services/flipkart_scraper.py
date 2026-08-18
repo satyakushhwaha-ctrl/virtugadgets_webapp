@@ -16,9 +16,11 @@ Design:
 """
 
 import asyncio
+from html import unescape
 import json
 import re
 import sys
+from html.parser import HTMLParser
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -683,6 +685,10 @@ def extract_images(product_ld: Optional[dict]) -> list[str]:
                 "advertise-image",
                 "gift-cards-image",
                 "help-centre-image",
+                "placeholder",
+                "captcha",
+                "robot-check",
+                "loader",
             ]
         ):
             continue
@@ -1096,6 +1102,152 @@ async def scrape_flipkart(url: str) -> dict:
         await browser.close()
 
         return result
+
+
+class _FlipkartHTMLDocumentParser(HTMLParser):
+    """Collect JSON-LD, visible text, and specification table rows."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.jsonld = []
+        self._script_type = ""
+        self._script_text = []
+        self.body_text = []
+        self.table_rows = []
+        self._row = None
+        self._cell = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "script" and "ld+json" in attrs.get("type", "").lower():
+            self._script_type = "ld+json"
+            self._script_text = []
+        if tag == "tr":
+            self._row = []
+        if tag in {"th", "td"} and self._row is not None:
+            self._cell = []
+
+    def handle_data(self, data):
+        if self._script_type:
+            self._script_text.append(data)
+        if data.strip():
+            self.body_text.append(data)
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._script_type:
+            try:
+                value = json.loads(unescape("".join(self._script_text)))
+                values = value if isinstance(value, list) else [value]
+                for item in values:
+                    if isinstance(item, dict):
+                        graph = item.get("@graph")
+                        self.jsonld.extend(graph if isinstance(graph, list) else [item])
+            except (TypeError, ValueError):
+                pass
+            self._script_type = ""
+            self._script_text = []
+        if tag in {"th", "td"} and self._cell is not None and self._row is not None:
+            value = re.sub(r"\s+", " ", " ".join(self._cell)).strip()
+            if value:
+                self._row.append(value)
+            self._cell = None
+        if tag == "tr" and self._row is not None:
+            if len(self._row) >= 2:
+                self.table_rows.append(self._row)
+            self._row = None
+
+
+def parse_flipkart_product_html(raw_html: str, url: str) -> dict:
+    """Adapt Scrape.do HTML to the existing Flipkart product result shape."""
+    document = _FlipkartHTMLDocumentParser()
+    document.feed(raw_html or "")
+    product_ld = find_product_json_ld(document.jsonld)
+    if not product_ld:
+        raise RuntimeError(
+            "Flipkart Product JSON-LD was not found. The page may have changed "
+            "or returned a bot/challenge page."
+        )
+
+    product_id = clean_text(product_ld.get("sku")) or extract_product_id(url)
+    brand = product_ld.get("brand")
+    if isinstance(brand, dict):
+        brand = brand.get("name")
+    offers = product_ld.get("offers")
+    if isinstance(offers, list):
+        offers = offers[0] if offers else {}
+    offers = offers if isinstance(offers, dict) else {}
+    selling_price = normalize_price(offers.get("price"))
+    body = re.sub(r"<script.*?</script>|<style.*?</style>", " ", raw_html or "", flags=re.I | re.S)
+    body_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()
+
+    mrp = None
+    mrp_match = re.search(
+        r"(?:30jeq3|3I9_wc|3auQ3N|strike|strik)[^>]*>\s*(?:<[^>]+>\s*)*₹?\s*([\d,]+)",
+        raw_html or "", re.I,
+    )
+    if mrp_match:
+        candidate = normalize_price(mrp_match.group(1))
+        if candidate is not None and (selling_price is None or candidate >= selling_price):
+            mrp = candidate
+    if mrp is None:
+        prices = [normalize_price(value) for value in re.findall(r"₹\s*([\d,]+)", body_text)]
+        prices = [value for value in prices if value is not None and (selling_price is None or value >= selling_price)]
+        mrp = min(prices) if prices else None
+
+    specifications = {}
+    for row in document.table_rows:
+        key, value = row[0], " ".join(row[1:])
+        if key.lower() not in {"specifications", "general", "dimensions"}:
+            specifications.setdefault(key, value)
+    additional = product_ld.get("additionalProperty")
+    if isinstance(additional, list):
+        for item in additional:
+            if isinstance(item, dict) and item.get("name") and item.get("value"):
+                specifications.setdefault(str(item["name"]), str(item["value"]))
+
+    seller_match = re.search(r"(?:sellerName|seller-name)[^>]*>\s*(?:<[^>]+>\s*)*([^<]+)", raw_html or "", re.I)
+    seller = clean_text(seller_match.group(1)) if seller_match else None
+    availability = normalize_availability(offers.get("availability"))
+    if not availability:
+        lower_body = body_text.lower()
+        if "out of stock" in lower_body or "currently unavailable" in lower_body:
+            availability = "OUT_OF_STOCK"
+        elif "in stock" in lower_body:
+            availability = "IN_STOCK"
+
+    delivery_match = re.search(r"((?:free )?delivery[^<]{0,160})", body_text, re.I)
+    delivery_text = clean_text(delivery_match.group(1)) if delivery_match else None
+    ratings = extract_ratings(product_ld)
+    return {
+        "marketplace": "flipkart",
+        "url": url,
+        "product": {
+            "pid": product_id,
+            "sku": product_id,
+            "title": clean_text(product_ld.get("name")),
+            "brand": clean_text(brand),
+            "description": clean_text(product_ld.get("description")),
+        },
+        "pricing": {
+            "currency": offers.get("priceCurrency") or "INR",
+            "selling_price": selling_price,
+            "mrp": mrp,
+            "discount_percentage": calculate_discount(selling_price, mrp),
+            "min_price": selling_price,
+            "max_price": selling_price,
+        },
+        "seller": {"name": seller, "id": None},
+        "availability": {"status": availability, "quantity_limit": None},
+        "delivery": {"free": "free" in (delivery_text or "").lower() or None, "text": delivery_text},
+        "ratings": ratings,
+        "images": extract_images(product_ld),
+        "highlights": [],
+        "specifications": specifications,
+        "reviews": extract_reviews(product_ld),
+        "raw": {"json_ld": document.jsonld},
+    }
 
 
 # ---------------------------------------------------------------------

@@ -53,6 +53,33 @@ BLOCK_MARKERS = (
 )
 
 
+def normalize_scrapedo_amazon_search_result(result: dict) -> dict:
+    """Adapt one Scrape.do search item to the existing internal result shape."""
+    if not isinstance(result, dict):
+        raise ValueError("Scrape.do Amazon search item is not an object.")
+    asin = _extract_asin(result.get("asin"), result.get("url") or result.get("product_url"))
+    product_url = _normalise_amazon_url(result.get("url") or result.get("product_url"), asin)
+    title = (result.get("title") or "").strip()
+    if not asin or not product_url or not title:
+        raise ValueError("Scrape.do Amazon search item is missing ASIN, URL, or title.")
+    price = result.get("price") if isinstance(result.get("price"), dict) else {}
+    rating = result.get("rating") if isinstance(result.get("rating"), dict) else {}
+    return {
+        "asin": asin,
+        "title": title,
+        "product_url": product_url,
+        "image_url": result.get("imageUrl") or result.get("image_url") or "",
+        "price": price.get("amount") if isinstance(price, dict) else price,
+        "currency": price.get("currencyCode") if isinstance(price, dict) else "",
+        "rating": rating.get("value") if isinstance(rating, dict) else rating,
+        "review_count": result.get("reviewCount") or rating.get("count"),
+        "sponsored": bool(result.get("isSponsored", result.get("sponsored", False))),
+        "is_prime": bool(result.get("isPrime", False)),
+        "position": result.get("position") or 0,
+        "badge": result.get("badge") or "",
+    }
+
+
 class AmazonSearchScrapingError(RuntimeError):
     """Base class for Amazon search scraping failures."""
 
@@ -766,3 +793,185 @@ def search_amazon_page(keyword: str, sort_value: str, page_number: int) -> dict:
         "source": used_provider,
         "url": build_amazon_search_url(normalised_keyword, sort_value, int(page_number)),
     }
+
+
+def _clean_amazon_html_text(value):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value or "")).strip()
+
+
+def _parse_scrapedo_amazon_search_html(raw_html: str) -> list[dict]:
+    """Parse the same Amazon result attributes used by the legacy parser.
+
+    Scrape.do returns HTML for exact sorted URLs. The stable Amazon
+    ``data-asin``/detail-link attributes are the HTML equivalent of the
+    existing parser's selectors; this adapter keeps the legacy parser intact.
+    """
+    rows = []
+    seen = set()
+    item_pattern = re.compile(
+        r"<[^>]+data-asin=[\"'](?P<asin>[A-Za-z0-9]{10})[\"'][^>]*>(?P<body>.*?)(?=<[^>]+data-asin=|$)",
+        re.I | re.S,
+    )
+    for match in item_pattern.finditer(raw_html or ""):
+        body = match.group("body")
+        asin = match.group("asin").upper()
+        if asin in seen:
+            continue
+        link = re.search(r"href=[\"']([^\"']*(?:/dp/|/gp/product/)[^\"']*)", body, re.I)
+        if not link:
+            continue
+        title_match = re.search(r"<(?:h2|span)[^>]*>(.*?)</(?:h2|span)>", body, re.I | re.S)
+        title = _clean_amazon_html_text(title_match.group(1) if title_match else body)[:1000]
+        if not title:
+            continue
+        image = re.search(r"<(?:img)\b[^>]*(?:src|data-src)=[\"']([^\"']+)", body, re.I)
+        price = re.search(r"a-price-whole[^>]*>\s*([\d,]+)", body, re.I)
+        seen.add(asin)
+        rows.append({
+            "asin": asin,
+            "title": title,
+            "url": urljoin(AMAZON_BASE_URL, link.group(1)),
+            "imageUrl": image.group(1) if image else "",
+            "price": {"amount": price.group(1).replace(",", "")} if price else {},
+            "isSponsored": "sponsored" in body.lower(),
+            "position": len(rows) + 1,
+        })
+    return rows
+
+
+def _scrapedo_has_next(payload, page_number, result_count):
+    products = payload.get("products") if isinstance(payload, dict) else None
+    if not result_count:
+        return False
+    total = payload.get("totalResults") if isinstance(payload, dict) else None
+    try:
+        return int(page_number) * result_count < int(str(total).replace(",", ""))
+    except (TypeError, ValueError):
+        # Amazon commonly returns a full page of 16 products. If the API does
+        # not provide totalResults, only a full page is evidence of another.
+        return result_count >= 16 and bool(products)
+
+
+def _legacy_amazon_search_page(keyword, sort_value, page_number):
+    """Explicit rollback path for existing provider configuration/failures."""
+    provider = os.getenv("AMAZON_SEARCH_PROVIDER", "auto").strip().lower() or "auto"
+    if provider == "scrapingbee":
+        payload = _scrape_search_results_scrapingbee(keyword, sort_value, page_number, include_metadata=True)
+        return payload, "scrapingbee"
+    try:
+        payload = _scrape_search_results(keyword, sort_value, page_number, include_metadata=True)
+        return payload, "playwright"
+    except (AmazonNavigationError, AmazonBlockedPageError) as exc:
+        logger.warning(
+            "[AMAZON SEARCH] provider=scrapedo fallback=playwright reason=%s",
+            str(exc)[:300],
+        )
+        payload = _scrape_search_results_scrapingbee(keyword, sort_value, page_number, include_metadata=True)
+        return payload, "scrapingbee"
+
+
+def _scrapedo_amazon_search_page(keyword: str, sort_value: str, page_number: int) -> dict:
+    from .scrapedo import ScrapeDoAmazonProvider, ScrapeDoError, ScrapeDoWebProvider
+
+    keyword = keyword.strip()
+    page_number = int(page_number)
+    if sort_value == DEFAULT_AMAZON_SORTING:
+        logger.info(
+            "[AMAZON SEARCH] provider=scrapedo_amazon keyword=%s page=%s sort=featured",
+            keyword, page_number,
+        )
+        try:
+            response = ScrapeDoAmazonProvider().search(keyword, page_number)
+            payload = response.data or {}
+            if "products" not in payload or not isinstance(payload.get("products"), list):
+                raise AmazonSearchSelectorError("Scrape.do Amazon search returned invalid products data.")
+            raw_results = payload.get("products")
+            results = []
+            for item in raw_results:
+                try:
+                    results.append(normalize_scrapedo_amazon_search_result(item))
+                except ValueError:
+                    logger.warning("[AMAZON SEARCH] provider=scrapedo_amazon invalid_result=true page=%s", page_number)
+            if not results and raw_results:
+                raise AmazonSearchSelectorError("Scrape.do Amazon search returned no usable products.")
+            has_next = _scrapedo_has_next(payload, page_number, len(results))
+            logger.info(
+                "[AMAZON SEARCH] status=%s results=%s request_cost=%s",
+                response.status_code, len(results), response.request_cost or "unknown",
+            )
+            return {"results": results, "has_next": has_next, "source": response.provider, "status_code": response.status_code, "request_cost": response.request_cost}
+        except ScrapeDoError:
+            raise
+
+    target_url = build_amazon_search_url(keyword, sort_value, page_number)
+    logger.info(
+        "[AMAZON SEARCH] provider=scrapedo_web keyword=%s page=%s sort=%s",
+        keyword, page_number, sort_value,
+    )
+    response = ScrapeDoWebProvider().fetch(target_url, render=True)
+    raw_results = _parse_scrapedo_amazon_search_html(response.html)
+    results = []
+    for item in raw_results:
+        try:
+            results.append(normalize_scrapedo_amazon_search_result(item))
+        except ValueError:
+            continue
+    if not results:
+        if "<html" in response.html.lower():
+            return {"results": [], "has_next": False, "source": response.provider, "status_code": response.status_code, "request_cost": response.request_cost, "url": target_url}
+        raise AmazonSearchSelectorError("Scrape.do Amazon HTML returned no usable products.")
+    logger.info(
+        "[AMAZON SEARCH] status=%s results=%s request_cost=%s",
+        response.status_code, len(results), response.request_cost or "unknown",
+    )
+    return {"results": results, "has_next": len(results) >= 16, "source": response.provider, "status_code": response.status_code, "request_cost": response.request_cost, "url": target_url}
+
+
+def search_amazon(keyword: str) -> list[dict]:
+    try:
+        return _scrapedo_amazon_search_page(keyword, DEFAULT_AMAZON_SORTING, 1)["results"]
+    except Exception as exc:
+        from django.conf import settings
+        if getattr(settings, "SCRAPEDO_API_TOKEN", "").strip():
+            raise
+        logger.warning("[AMAZON SEARCH] provider=scrapedo fallback=legacy error_type=%s", exc.__class__.__name__)
+        provider = os.getenv("AMAZON_SEARCH_PROVIDER", "auto").strip().lower() or "auto"
+        if provider == "scrapingbee":
+            results = _scrape_search_results_scrapingbee(keyword.strip())
+        else:
+            try:
+                results = _scrape_search_results(keyword.strip())
+            except (AmazonNavigationError, AmazonBlockedPageError) as direct_exc:
+                logger.warning("[AMAZON SEARCH] provider=scrapedo fallback=playwright reason=%s", str(direct_exc)[:300])
+                results = _scrape_search_results_scrapingbee(keyword.strip())
+        normalized = []
+        seen = set()
+        for result in results or []:
+            asin = _extract_asin(result.get("asin"), result.get("product_url"))
+            product_url = _normalise_amazon_url(result.get("product_url"), asin)
+            if not asin or not product_url or asin in seen:
+                continue
+            seen.add(asin)
+            normalized.append({"asin": asin, "title": (result.get("title") or "").strip(), "product_url": product_url, "position": result.get("position") or len(normalized) + 1, "sponsored": bool(result.get("sponsored", False))})
+        return normalized
+
+
+def search_amazon_page(keyword: str, sort_value: str, page_number: int) -> dict:
+    try:
+        return _scrapedo_amazon_search_page(keyword, sort_value or DEFAULT_AMAZON_SORTING, page_number)
+    except Exception:
+        from django.conf import settings
+        if getattr(settings, "SCRAPEDO_API_TOKEN", "").strip():
+            raise
+        payload, used_provider = _legacy_amazon_search_page(keyword.strip(), sort_value or DEFAULT_AMAZON_SORTING, int(page_number))
+        raw_results = payload.get("results", payload) if isinstance(payload, dict) else payload
+        normalized = []
+        seen = set()
+        for result in raw_results or []:
+            asin = _extract_asin(result.get("asin"), result.get("product_url"))
+            product_url = _normalise_amazon_url(result.get("product_url"), asin)
+            if not asin or not product_url or asin in seen:
+                continue
+            seen.add(asin)
+            normalized.append({"asin": asin, "title": (result.get("title") or "").strip(), "product_url": product_url, "position": result.get("position") or len(normalized) + 1, "sponsored": bool(result.get("sponsored", False))})
+        return {"results": normalized, "has_next": bool(payload.get("has_next")) if isinstance(payload, dict) else False, "source": used_provider, "request_cost": None, "url": build_amazon_search_url(keyword.strip(), sort_value or DEFAULT_AMAZON_SORTING, int(page_number))}

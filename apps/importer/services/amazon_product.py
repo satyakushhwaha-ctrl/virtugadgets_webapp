@@ -4,9 +4,9 @@ The scraper is deliberately kept separate from Django.  This module bridges
 the async scraper response into the existing staging/workflow model.
 """
 
+import json
 import asyncio
 import inspect
-import json
 import logging
 import os
 import re
@@ -21,13 +21,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import AmazonProduct, AmazonSearchResult, ImportStatus
-from .amazon_scraper import (
-    clean_price,
-    is_valid_amazon_image,
-    normalize_amazon_brand,
-    scrape_amazon,
-    upgrade_amazon_image,
-)
+from .amazon_scraper import clean_price, is_valid_amazon_image, normalize_amazon_brand, scrape_amazon, upgrade_amazon_image
 from .jobs import concise_error_message
 
 
@@ -38,6 +32,13 @@ _BLOCK_MARKERS = (
     "captcha", "robot check", "unusual traffic", "access denied",
     "download is starting", "sorry, we just need to make sure",
 )
+
+
+def extract_amazon_product_data(url: str, on_basic_data=None) -> dict:
+    result = scrape_amazon(url, on_basic_data=on_basic_data)
+    if inspect.isawaitable(result):
+        return asyncio.run(result)
+    return result
 
 
 class AmazonProviderError(RuntimeError):
@@ -66,18 +67,6 @@ class _ProviderPayload(dict):
     def __init__(self, data, diagnostics=None):
         super().__init__(data)
         self.diagnostics = diagnostics or {}
-
-
-def _run_scraper(url, on_basic_data=None):
-    result = scrape_amazon(url, on_basic_data=on_basic_data)
-    if inspect.isawaitable(result):
-        return asyncio.run(result)
-    return result
-
-
-def extract_amazon_product_data(url: str, on_basic_data=None) -> dict:
-    """Compatibility name for callers; the canonical implementation is the standalone scraper."""
-    return _run_scraper(url, on_basic_data=on_basic_data)
 
 
 def _html_text(value):
@@ -695,3 +684,145 @@ def process_amazon_search_result(search_result: AmazonSearchResult, on_basic_dat
         product.save(update_fields=["status", "error_message", "updated_at"])
         raise
     return True
+
+
+# Keep the pre-Phase-3 implementation available only as an explicit local
+# rollback when Scrape.do has not been configured. Once a token is present,
+# the PDP path below is the only provider attempted.
+_legacy_extract_amazon_product = extract_amazon_product
+
+
+def normalize_scrapedo_amazon_product(raw: dict, url: str) -> dict:
+    """Normalize Scrape.do's flat PDP response to VirtuGadgets' structure."""
+    if not isinstance(raw, dict):
+        raise ValueError("Scrape.do Amazon PDP returned invalid JSON.")
+
+    product = raw.get("product") if isinstance(raw.get("product"), dict) else raw
+    pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else raw
+    asin = _value(product, "asin", "id", "sku") or raw.get("asin")
+    title = _value(product, "title", "name", "product_title") or raw.get("title", "")
+    brand = normalize_amazon_brand(_value(product, "brand") or raw.get("brand", ""))
+
+    selling_price = _value(pricing, "selling_price", "sellingPrice", "price")
+    mrp = _value(pricing, "mrp", "list_price", "listPrice")
+    selling_price = clean_price(selling_price) if selling_price is not None else None
+    mrp = clean_price(mrp) if mrp is not None else None
+
+    image_values = raw.get("images") or product.get("images") or []
+    if isinstance(image_values, (str, dict)):
+        image_values = [image_values]
+    image_urls = [
+        item.get("url") if isinstance(item, dict) else item
+        for item in image_values
+    ]
+    thumbnail = raw.get("thumbnail") or product.get("thumbnail")
+    if thumbnail:
+        image_urls.append(thumbnail)
+
+    specifications = (
+        raw.get("technical_details")
+        or raw.get("technicalDetails")
+        or raw.get("specifications")
+        or {}
+    )
+    if not isinstance(specifications, dict):
+        specifications = {}
+
+    seller = raw.get("seller") or raw.get("seller_info") or {}
+    if isinstance(seller, dict):
+        seller_name = seller.get("name") or seller.get("seller_name") or ""
+        seller_rating = seller.get("rating") or seller.get("seller_rating")
+    else:
+        seller_name = seller if isinstance(seller, str) else ""
+        seller_rating = None
+
+    availability = raw.get("availability") or product.get("availability") or ""
+    if isinstance(availability, dict):
+        availability = availability.get("status") or availability.get("value") or ""
+    shipping_info = raw.get("shipping_info") or raw.get("shippingInfo") or []
+    highlights = (
+        raw.get("highlights")
+        or raw.get("feature_bullets")
+        or raw.get("featureBullets")
+        or raw.get("bullet_points")
+        or []
+    )
+    if isinstance(highlights, str):
+        highlights = [highlights]
+    highlights = list(dict.fromkeys(item for item in highlights if item)) if isinstance(highlights, list) else []
+
+    return {
+        "asin": str(asin or "").strip().upper(),
+        "product_title": str(title or "").strip(),
+        "brand": brand,
+        "url": raw.get("url") or product.get("url") or url,
+        "availability": str(availability or "").strip(),
+        "images": _normalise_static_images(image_urls),
+        "description": _value(product, "description") or raw.get("description", ""),
+        "highlights": highlights,
+        "specifications": specifications,
+        "mrp_inr": mrp,
+        "current_selling_price_inr": selling_price,
+        "selling_price_min_inr": selling_price,
+        "selling_price_max_inr": selling_price,
+        "primary_seller": seller_name,
+        "seller_rating": seller_rating,
+        "processor": _specification(specifications, "processor", "processor name"),
+        "ram": _specification(specifications, "ram", "ram size", "memory"),
+        "storage": _specification(specifications, "storage", "ssd", "hard drive", "storage capacity"),
+        "operating_system": _specification(specifications, "operating system", "os"),
+        "display_size": _specification(specifications, "display size", "screen size"),
+        "resolution": _specification(specifications, "resolution"),
+        "color": _specification(specifications, "color", "colour"),
+        "weight_kg": _weight_kg(_specification(specifications, "weight", "item weight")),
+        "software": _specification(specifications, "software"),
+        "warranty": _specification(specifications, "warranty", "manufacturer warranty"),
+        # These are retained in the normalized provider structure when the
+        # current database has no corresponding columns.
+        "rating": raw.get("rating") or product.get("rating"),
+        "review_count": raw.get("total_ratings") or raw.get("reviewCount") or raw.get("review_count"),
+        "delivery": shipping_info,
+        "category": raw.get("category") or raw.get("category_name"),
+        "model": _specification(specifications, "model", "model name") or raw.get("model"),
+    }
+
+
+def extract_amazon_product(url: str, on_basic_data=None) -> dict:
+    """Extract and validate an Amazon PDP through Scrape.do."""
+    from django.conf import settings
+    from .scrapedo import ScrapeDoAmazonProvider
+
+    if not getattr(settings, "SCRAPEDO_API_TOKEN", "").strip():
+        extract_amazon_product.last_provider_metadata = {}
+        return _legacy_extract_amazon_product(url, on_basic_data=on_basic_data)
+    asin = _asin_from_url(url)
+    if asin == "unknown":
+        raise ValueError("Invalid Amazon product URL.")
+
+    logger.info("[AMAZON PRODUCT] asin=%s provider=scrapedo_amazon", asin)
+    response = ScrapeDoAmazonProvider().product(asin)
+    metadata = {
+        "provider": response.provider,
+        "status_code": response.status_code,
+        "request_cost": response.request_cost,
+        "provider_duration_ms": response.duration_ms,
+    }
+    extract_amazon_product.last_provider_metadata = metadata
+    logger.info(
+        "[AMAZON PRODUCT] asin=%s provider=%s status=%s request_cost=%s",
+        asin, response.provider, response.status_code, response.request_cost or "unknown",
+    )
+    parse_started = time.monotonic()
+    data = normalize_scrapedo_amazon_product(response.data or {}, url)
+    report = build_amazon_product_quality_report(data)
+    metadata["parse_duration_ms"] = max(0, round((time.monotonic() - parse_started) * 1000))
+    extract_amazon_product.last_provider_metadata = metadata
+    _log_quality(asin, response.provider, report)
+    if not report["valid"]:
+        logger.error(
+            "[AMAZON PRODUCT] asin=%s validation=failed missing_required=%s",
+            asin, ",".join(report["missing_required"]),
+        )
+        raise ValueError(f"Amazon product data is incomplete: {', '.join(report['missing_required'])}")
+    logger.info("[AMAZON PRODUCT] asin=%s validation=passed", asin)
+    return data

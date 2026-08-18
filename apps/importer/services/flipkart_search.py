@@ -2,8 +2,10 @@
 
 import logging
 import re
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 
 
@@ -16,6 +18,18 @@ CAPACITY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 logger = logging.getLogger(__name__)
+
+
+class FlipkartSearchScrapingError(ConnectionError):
+    """Raised when a fetched Flipkart search page is not usable."""
+
+
+def build_flipkart_search_url(query: str, page: int = 1) -> str:
+    """Build the same Flipkart search URL used by the legacy scraper."""
+    url = SEARCH_URL.format(query=quote_plus(query.strip()))
+    if int(page) > 1:
+        url += f"&page={int(page)}"
+    return url
 
 
 def _normalise_capacity(value: str | None, kind: str) -> str | None:
@@ -373,29 +387,180 @@ def _scrape_search_results(query: str) -> list[dict]:
                 browser.close()
 
 
-def search_flipkart(query: str) -> list[dict]:
-    """Search Flipkart and return unique, normalized candidate dictionaries."""
-    if not isinstance(query, str) or not query.strip():
-        raise ValidationError("Flipkart search query cannot be empty.")
+class _FlipkartSearchHTMLParser(HTMLParser):
+    """Small HTML adapter for the selectors used by the old search parser."""
 
-    logger.info("Fetching Flipkart webpage details securely via Playwright...")
-    logger.info("Flipkart search URL: %s", SEARCH_URL.format(query=quote_plus(query.strip())))
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows = []
+        self._anchor = None
+        self._anchors = []
+        self._page_numbers = set()
+        self._next_page = False
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        href = attributes.get("href", "")
+        classes = attributes.get("class", "")
+        if tag == "a" and href:
+            self._anchor = {"href": href, "text": [], "sponsored": False}
+            self._anchors.append(self._anchor)
+            if "page=" in href:
+                match = re.search(r"[?&]page=(\d+)", href)
+                if match:
+                    self._page_numbers.add(int(match.group(1)))
+            if "next" in f"{href} {classes}".lower():
+                self._next_page = True
+
+    def handle_data(self, data):
+        if self._anchor is not None:
+            self._anchor["text"].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._anchor = None
+
+
+def _parse_flipkart_search_html(raw_html: str) -> dict:
+    """Parse provider HTML into the same raw rows as the legacy parser."""
+    parser = _FlipkartSearchHTMLParser()
+    parser.feed(raw_html or "")
+    rows = []
+    seen_urls = set()
+    for anchor in parser._anchors:
+        product_url = _normalise_product_url(anchor["href"])
+        if not product_url or not _extract_pid(product_url):
+            continue
+        lines = [" ".join(line.split()) for line in anchor["text"] if line.strip()]
+        title = next(
+            (
+                line for line in lines
+                if line.lower() not in {"add to compare", "currently unavailable"}
+                and "ratings" not in line.lower()
+                and "reviews" not in line.lower()
+                and not line.startswith("₹")
+            ),
+            "",
+        )
+        if not title or product_url in seen_urls:
+            continue
+        seen_urls.add(product_url)
+        rows.append({
+            "title": title,
+            "product_url": product_url,
+            "position": len(rows) + 1,
+            "sponsored": "sponsored" in " ".join(lines).lower(),
+        })
+    return {
+        "results": rows,
+        "has_next": parser._next_page or bool(parser._page_numbers and max(parser._page_numbers) > 1),
+    }
+
+
+def _flipkart_block_reason(raw_html: str) -> str | None:
+    content = (raw_html or "").lower()
+    markers = (
+        ("captcha", "captcha page"),
+        ("robot check", "robot-check page"),
+        ("access denied", "access-denied page"),
+        ("verify you are human", "human-verification page"),
+        ("unusual traffic", "unusual-traffic page"),
+    )
+    for marker, reason in markers:
+        if marker in content:
+            return reason
+    return None
+
+
+def _scrapedo_flipkart_search_page(query: str, page: int) -> dict:
+    from .scrapedo import ScrapeDoWebProvider
+
+    target_url = build_flipkart_search_url(query, page)
+    logger.info(
+        "[FLIPKART SEARCH] provider=scrapedo_web keyword=%s page=%s",
+        query, page,
+    )
+    response = ScrapeDoWebProvider().fetch(target_url, render=True)
+    html = response.html or ""
+    logger.info(
+        "[FLIPKART SEARCH] status=%s html_length=%s request_cost=%s",
+        response.status_code, len(html), response.request_cost or "unknown",
+    )
+    block_reason = _flipkart_block_reason(html)
+    if block_reason:
+        raise FlipkartSearchScrapingError(
+            f"Scrape.do returned a Flipkart {block_reason}."
+        )
+    parsed = _parse_flipkart_search_html(html)
+    if not parsed["results"]:
+        empty_markers = ("no results", "no products found", "sorry, no")
+        if not any(marker in html.lower() for marker in empty_markers):
+            raise FlipkartSearchScrapingError(
+                "Scrape.do returned HTML but Flipkart search candidates were not found."
+            )
+    logger.info(
+        "[FLIPKART SEARCH] parser candidates=%s",
+        len(parsed["results"]),
+    )
+    return {
+        **parsed,
+        "source": response.provider,
+        "status_code": response.status_code,
+        "request_cost": response.request_cost,
+        "url": target_url,
+    }
+
+
+def _normalize_flipkart_candidates(raw_results: list[dict]) -> list[dict]:
     normalized = []
     seen_pids = set()
-    for result in _scrape_search_results(query.strip()):
+    for result in raw_results:
         product_url = _normalise_product_url(result.get("product_url"))
         pid = _extract_pid(product_url) if product_url else None
         title = (result.get("title") or "").strip()
         if not pid or not product_url or not title or pid in seen_pids:
             continue
         seen_pids.add(pid)
-        normalized.append(
-            {
-                "pid": pid,
-                "title": title,
-                "product_url": product_url,
-                "position": result.get("position") or len(normalized) + 1,
-                "sponsored": bool(result.get("sponsored", False)),
-            }
-        )
+        normalized.append({
+            "pid": pid,
+            "title": title,
+            "product_url": product_url,
+            "position": result.get("position") or len(normalized) + 1,
+            "sponsored": bool(result.get("sponsored", False)),
+        })
     return normalized
+
+
+def search_flipkart_page(query: str, page: int = 1) -> dict:
+    """Fetch and normalize one page, preferring Scrape.do when configured."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValidationError("Flipkart search query cannot be empty.")
+    page = max(1, int(page))
+    if getattr(settings, "SCRAPEDO_API_TOKEN", "").strip():
+        payload = _scrapedo_flipkart_search_page(query.strip(), page)
+        payload["results"] = _normalize_flipkart_candidates(payload["results"])
+        return payload
+
+    logger.warning(
+        "[FLIPKART SEARCH] provider=scrapedo fallback=playwright reason=token_not_configured"
+    )
+    if page != 1:
+        raise FlipkartSearchScrapingError(
+            "Flipkart pagination requires SCRAPEDO_API_TOKEN."
+        )
+    return {
+        "results": _normalize_flipkart_candidates(_scrape_search_results(query.strip())),
+        "has_next": False,
+        "source": "playwright",
+        "request_cost": None,
+        "url": build_flipkart_search_url(query, page),
+    }
+
+
+def search_flipkart(query: str, page: int = 1) -> list[dict]:
+    """Search Flipkart and return unique, normalized candidate dictionaries."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValidationError("Flipkart search query cannot be empty.")
+
+    logger.info("[FLIPKART SEARCH] target_url=%s", build_flipkart_search_url(query, page))
+    return search_flipkart_page(query, page)["results"]

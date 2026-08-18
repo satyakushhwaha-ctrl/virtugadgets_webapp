@@ -3,6 +3,11 @@
 {% block submit_buttons_bottom %}
   {{ block.super }}
   <div class="submit-row">
+    {% if original.status == "running" %}
+      <input type="submit" name="_refresh_product" value="Refreshing…" disabled>
+    {% else %}
+      <input type="submit" name="_refresh_product" value="Refresh Amazon Product" class="default">
+    {% endif %}
     {% if original.approval_status != "approved" %}
       <input type="submit" name="_approve_product" value="Approve">
     {% endif %}

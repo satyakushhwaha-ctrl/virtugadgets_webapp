@@ -20,6 +20,7 @@ class SearchImportSummary:
     sorting: str = "Featured / Relevance"
     sorting_value: str = "relevanceblender"
     reason: str = ""
+    request_costs: tuple[str, ...] = ()
 
 
 def _sorting_label(search_keyword: SearchKeyword) -> str:
@@ -75,6 +76,7 @@ def run_amazon_search_for_keyword(search_keyword: SearchKeyword) -> SearchImport
     scraped_pages = 0
     available_pages = requested_pages
     reason = ""
+    request_costs = []
 
     try:
         for page_number in range(1, requested_pages + 1):
@@ -91,12 +93,14 @@ def run_amazon_search_for_keyword(search_keyword: SearchKeyword) -> SearchImport
                 )
 
             page_results = page_payload.get("results", [])
+            if page_payload.get("request_cost") is not None:
+                request_costs.append(str(page_payload["request_cost"]))
             if not page_results:
                 available_pages = max(0, page_number - 1)
                 if available_pages < requested_pages:
                     reason = (
-                        f"Requested {requested_pages} pages, but Amazon had only "
-                        f"{available_pages} available pages for this search."
+                        f"Requested {requested_pages} pages, but only {available_pages} "
+                        f"pages were available."
                     )
                 break
 
@@ -110,8 +114,8 @@ def run_amazon_search_for_keyword(search_keyword: SearchKeyword) -> SearchImport
             if page_number < requested_pages and not has_next:
                 available_pages = page_number
                 reason = (
-                    f"Requested {requested_pages} pages, but Amazon had only "
-                    f"{available_pages} available pages for this search."
+                    f"Requested {requested_pages} pages, but only {available_pages} "
+                    f"pages were available."
                 )
                 break
             available_pages = page_number if not has_next else requested_pages
@@ -136,4 +140,5 @@ def run_amazon_search_for_keyword(search_keyword: SearchKeyword) -> SearchImport
         sorting=sorting_label,
         sorting_value=sorting_value,
         reason=reason,
+        request_costs=tuple(request_costs),
     )

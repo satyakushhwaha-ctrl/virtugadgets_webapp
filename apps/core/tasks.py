@@ -1,6 +1,8 @@
 import logging
+import time
 
 from celery import shared_task
+from django.conf import settings
 
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ def _start_job(job):
 def _handle_failure(task, job, exc, operation):
     from apps.importer.services.jobs import increment_job_retry, mark_job_failed, mark_job_queued
 
-    if isinstance(exc, _RETRYABLE_EXCEPTIONS) and task.request.retries < 2:
+    if (isinstance(exc, _RETRYABLE_EXCEPTIONS) or getattr(exc, "retryable", False)) and task.request.retries < 2:
         increment_job_retry(job)
         mark_job_queued(job, task.request.id or job.celery_task_id, force=True)
         logger.warning("%s failed transiently; retrying.", operation, exc_info=True)
@@ -58,7 +60,7 @@ def celery_health_check():
     return "ok"
 
 
-@shared_task(bind=True, name="apps.core.tasks.amazon_search_task")
+@shared_task(bind=True, name="apps.core.tasks.amazon_search_task", soft_time_limit=settings.SCRAPEDO_TASK_SOFT_TIME_LIMIT, time_limit=settings.SCRAPEDO_TASK_TIME_LIMIT)
 def amazon_search_task(self, search_keyword_id, job_id=None):
     from apps.importer.models import ImporterJobMarketplace, ImporterJobType, SearchKeyword
     from apps.importer.services.jobs import mark_job_completed, mark_job_failed, update_job_progress
@@ -84,6 +86,7 @@ def amazon_search_task(self, search_keyword_id, job_id=None):
         sorting = getattr(summary, "sorting", keyword.amazon_sorting_label)
         sorting_value = getattr(summary, "sorting_value", keyword.amazon_sorting)
         reason = getattr(summary, "reason", "")
+        request_costs = list(getattr(summary, "request_costs", ()) or ())
         products_found = getattr(summary, "total_results", summary.saved)
         result_message = reason or (
             f"Search completed across {scraped_pages} page(s); "
@@ -98,6 +101,7 @@ def amazon_search_task(self, search_keyword_id, job_id=None):
             "available_pages": available_pages,
             "scraped_pages": scraped_pages,
             "products_found": products_found,
+            "scrapedo_request_costs": request_costs,
         }
         job.save(update_fields=["metadata", "updated_at"])
         update_job_progress(
@@ -127,12 +131,12 @@ def amazon_search_task(self, search_keyword_id, job_id=None):
         _handle_failure(self, job, exc, f"Amazon search for {keyword.keyword}")
 
 
-@shared_task(bind=True, name="apps.core.tasks.amazon_product_extraction_task")
+@shared_task(bind=True, name="apps.core.tasks.amazon_product_extraction_task", soft_time_limit=settings.SCRAPEDO_TASK_SOFT_TIME_LIMIT, time_limit=settings.SCRAPEDO_TASK_TIME_LIMIT)
 def amazon_product_extraction_task(self, search_result_id, job_id=None):
     from asgiref.sync import sync_to_async
     from apps.importer.models import AmazonProduct, AmazonSearchResult, ImporterJobMarketplace, ImporterJobType
     from apps.importer.services.jobs import mark_job_completed, mark_job_skipped, update_job_progress
-    from apps.importer.services.amazon_product import process_amazon_search_result
+    from apps.importer.services.amazon_product import extract_amazon_product, process_amazon_search_result
 
     try:
         result = AmazonSearchResult.objects.select_related("keyword").get(pk=search_result_id)
@@ -140,6 +144,7 @@ def amazon_product_extraction_task(self, search_result_id, job_id=None):
         return _missing_job(job_id, title=f"Amazon Product Extraction — {search_result_id}", job_type=ImporterJobType.AMAZON_PRODUCT_EXTRACTION, marketplace=ImporterJobMarketplace.AMAZON, reason="AmazonSearchResult not found.")
     job = _job_for_task(job_id, title=f"Amazon Product Extraction — {result.asin}", job_type=ImporterJobType.AMAZON_PRODUCT_EXTRACTION, marketplace=ImporterJobMarketplace.AMAZON)
     _start_job(job)
+    started = time.monotonic()
     try:
         async def report_basic_data(_data):
             await sync_to_async(update_job_progress, thread_sensitive=True)(
@@ -150,7 +155,14 @@ def amazon_product_extraction_task(self, search_result_id, job_id=None):
         processed = process_amazon_search_result(result, on_basic_data=report_basic_data)
         product = AmazonProduct.objects.get(asin=result.asin)
         job.amazon_product = product
-        job.save(update_fields=["amazon_product", "updated_at"])
+        provider_metadata = getattr(extract_amazon_product, "last_provider_metadata", {})
+        if provider_metadata:
+            provider_metadata = {**provider_metadata, "total_duration_ms": max(0, round((time.monotonic() - started) * 1000))}
+            job.metadata = {
+                **(job.metadata if isinstance(job.metadata, dict) else {}),
+                "extraction": provider_metadata,
+            }
+        job.save(update_fields=["amazon_product", "metadata", "updated_at"])
         update_job_progress(job, processed_items=1, success_count=int(bool(processed)), skipped_count=int(not processed))
         if processed:
             mark_job_completed(job, f"Amazon product {result.asin} extracted successfully.")
@@ -165,7 +177,7 @@ def amazon_product_extraction_task(self, search_result_id, job_id=None):
         _handle_failure(self, job, exc, f"Amazon product extraction for {result.asin}")
 
 
-@shared_task(bind=True, name="apps.core.tasks.flipkart_search_task")
+@shared_task(bind=True, name="apps.core.tasks.flipkart_search_task", soft_time_limit=settings.SCRAPEDO_TASK_SOFT_TIME_LIMIT, time_limit=settings.SCRAPEDO_TASK_TIME_LIMIT)
 def flipkart_search_task(self, search_keyword_id, job_id=None):
     from apps.importer.models import ImporterJobMarketplace, ImporterJobType, SearchKeyword
     from apps.importer.services.jobs import mark_job_completed, mark_job_partial, update_job_progress
@@ -175,26 +187,47 @@ def flipkart_search_task(self, search_keyword_id, job_id=None):
         keyword = SearchKeyword.objects.get(pk=search_keyword_id)
     except SearchKeyword.DoesNotExist:
         return _missing_job(job_id, title=f"Flipkart Search — {search_keyword_id}", job_type=ImporterJobType.FLIPKART_SEARCH, marketplace=ImporterJobMarketplace.FLIPKART, reason="SearchKeyword not found.")
-    job = _job_for_task(job_id, title=f"Flipkart Search — {keyword.keyword}", job_type=ImporterJobType.FLIPKART_SEARCH, marketplace=ImporterJobMarketplace.FLIPKART)
+    job = _job_for_task(
+        job_id,
+        title=f"Flipkart Search — {keyword.keyword}",
+        job_type=ImporterJobType.FLIPKART_SEARCH,
+        marketplace=ImporterJobMarketplace.FLIPKART,
+        total_items=max(1, int(keyword.amazon_pages or 1)),
+    )
     _start_job(job)
     try:
         summary = run_flipkart_search_for_keyword(keyword)
         failed = int(bool(summary.failed))
-        update_job_progress(job, processed_items=1, success_count=int(not failed), failed_count=failed, result_message=f"Flipkart search returned {summary.candidates_found} candidates; saved {summary.saved}.")
+        reason = getattr(summary, "reason", "")
+        requested_pages = getattr(summary, "requested_pages", max(1, int(keyword.amazon_pages or 1)))
+        available_pages = getattr(summary, "available_pages", requested_pages)
+        scraped_pages = getattr(summary, "scraped_pages", 1)
+        request_costs = list(getattr(summary, "request_costs", ()) or ())
+        job.metadata = {
+            **(job.metadata if isinstance(job.metadata, dict) else {}),
+            "keyword": keyword.keyword,
+            "requested_pages": requested_pages,
+            "available_pages": available_pages,
+            "scraped_pages": scraped_pages,
+            "scrapedo_request_costs": request_costs,
+        }
+        job.save(update_fields=["metadata", "updated_at"])
+        result_message = reason or f"Flipkart search returned {summary.candidates_found} candidates; saved {summary.saved}."
+        update_job_progress(job, processed_items=scraped_pages, success_count=int(not failed), failed_count=failed, result_message=result_message)
         if failed:
             mark_job_partial(job, job.result_message)
         else:
             mark_job_completed(job, job.result_message)
-        return {"status": "partial" if failed else "completed", "id": str(keyword.pk), "job_id": str(job.pk), "candidates_found": summary.candidates_found, "saved": summary.saved}
+        return {"status": "partial" if failed else "completed", "id": str(keyword.pk), "job_id": str(job.pk), "candidates_found": summary.candidates_found, "saved": summary.saved, "requested_pages": requested_pages, "available_pages": available_pages, "scraped_pages": scraped_pages}
     except Exception as exc:
         _handle_failure(self, job, exc, f"Flipkart search for {keyword.keyword}")
 
 
-@shared_task(bind=True, name="apps.core.tasks.flipkart_product_extraction_task")
+@shared_task(bind=True, name="apps.core.tasks.flipkart_product_extraction_task", soft_time_limit=settings.SCRAPEDO_TASK_SOFT_TIME_LIMIT, time_limit=settings.SCRAPEDO_TASK_TIME_LIMIT)
 def flipkart_product_extraction_task(self, search_result_id, job_id=None):
     from apps.importer.models import FlipkartProduct, FlipkartSearchResult, ImporterJobMarketplace, ImporterJobType
     from apps.importer.services.jobs import mark_job_completed, mark_job_skipped, update_job_progress
-    from apps.importer.services.flipkart_product import process_flipkart_search_result
+    from apps.importer.services.flipkart_product import extract_flipkart_product_data, process_flipkart_search_result
 
     try:
         result = FlipkartSearchResult.objects.select_related("amazon_product").get(pk=search_result_id)
@@ -202,11 +235,19 @@ def flipkart_product_extraction_task(self, search_result_id, job_id=None):
         return _missing_job(job_id, title=f"Flipkart Product Extraction — {search_result_id}", job_type=ImporterJobType.FLIPKART_PRODUCT_EXTRACTION, marketplace=ImporterJobMarketplace.FLIPKART, reason="FlipkartSearchResult not found.")
     job = _job_for_task(job_id, title=f"Flipkart Product Extraction — PID {result.pid}", job_type=ImporterJobType.FLIPKART_PRODUCT_EXTRACTION, marketplace=ImporterJobMarketplace.FLIPKART)
     _start_job(job)
+    started = time.monotonic()
     try:
         processed = process_flipkart_search_result(result)
         product = FlipkartProduct.objects.get(pid=result.pid)
         job.flipkart_product = product
-        job.save(update_fields=["flipkart_product", "updated_at"])
+        provider_metadata = getattr(extract_flipkart_product_data, "last_provider_metadata", {})
+        if provider_metadata:
+            provider_metadata = {**provider_metadata, "total_duration_ms": max(0, round((time.monotonic() - started) * 1000))}
+            job.metadata = {
+                **(job.metadata if isinstance(job.metadata, dict) else {}),
+                "extraction": provider_metadata,
+            }
+        job.save(update_fields=["flipkart_product", "metadata", "updated_at"])
         update_job_progress(job, processed_items=1, success_count=int(bool(processed)), skipped_count=int(not processed))
         if processed:
             mark_job_completed(job, f"Flipkart PID {result.pid} extracted successfully.")

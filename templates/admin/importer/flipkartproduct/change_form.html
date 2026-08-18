@@ -1,0 +1,12 @@
+{% extends "admin/change_form.html" %}
+
+{% block submit_buttons_bottom %}
+  {{ block.super }}
+  <div class="submit-row">
+    {% if original.status == "running" %}
+      <input type="submit" name="_refresh_product" value="Refreshing…" disabled>
+    {% else %}
+      <input type="submit" name="_refresh_product" value="Refresh Flipkart Product" class="default">
+    {% endif %}
+  </div>
+{% endblock %}

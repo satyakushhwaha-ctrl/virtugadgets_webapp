@@ -60,6 +60,7 @@ from .services.product_publisher import (
 )
 from .services.batch_runner import cancel_batch, publish_approved_products, run_batch
 from .services.jobs import create_job, enqueue_job
+from .services.refresh import queue_amazon_product_refresh, queue_flipkart_product_refresh
 
 
 def _status_badge(value, *, label=None):
@@ -692,6 +693,7 @@ class AmazonSearchResultAdmin(ModelAdmin):
                     job_type=ImporterJobType.AMAZON_PRODUCT_EXTRACTION,
                     marketplace=ImporterJobMarketplace.AMAZON,
                     args=(str(search_result.pk),),
+                    metadata={"search_result_id": str(search_result.pk)},
                 )
                 queued += 1
             except Exception as exc:
@@ -719,6 +721,7 @@ class FlipkartSearchResultAdmin(ModelAdmin):
                     job_type=ImporterJobType.FLIPKART_PRODUCT_EXTRACTION,
                     marketplace=ImporterJobMarketplace.FLIPKART,
                     args=(str(search_result.pk),),
+                    metadata={"search_result_id": str(search_result.pk)},
                 )
                 queued += 1
             except Exception as exc:
@@ -742,6 +745,7 @@ class FlipkartProductAdminForm(forms.ModelForm):
 @admin.register(FlipkartProduct)
 class FlipkartProductAdmin(ModelAdmin):
     form = FlipkartProductAdminForm
+    change_form_template = "admin/importer/flipkartproduct/change_form.html"
     list_display = (
         "image_preview", "product_summary", "pid", "brand", "categories_display",
         "current_selling_price_inr", "availability", "status_badge",
@@ -760,6 +764,7 @@ class FlipkartProductAdmin(ModelAdmin):
         "publish_selected",
         "unpublish_selected",
         "search_amazon",
+        "refresh_selected",
     )
     autocomplete_fields = ("published_product",)
     filter_horizontal = ("categories",)
@@ -818,6 +823,49 @@ class FlipkartProductAdmin(ModelAdmin):
                 associate_flipkart_product(obj, obj.published_product, request.user)
             except PublishValidationError as exc:
                 self.message_user(request, str(exc), level=messages.ERROR)
+
+    def response_change(self, request, obj):
+        if "_refresh_product" in request.POST:
+            self._queue_refresh(request, obj)
+        return super().response_change(request, obj)
+
+    def _queue_refresh(self, request, product):
+        try:
+            job, message = queue_flipkart_product_refresh(
+                product=product,
+                task=flipkart_product_extraction_task,
+                user=request.user,
+            )
+            self.message_user(
+                request,
+                message or "Flipkart product refresh queued.",
+                level=messages.WARNING if message else messages.SUCCESS,
+            )
+        except Exception:
+            self.message_user(request, "Unable to queue refresh: an internal queue error occurred.", level=messages.ERROR)
+
+    @admin.action(description="Refresh selected Flipkart products")
+    def refresh_selected(self, request, queryset):
+        queued = skipped = 0
+        for product in queryset.iterator(chunk_size=100):
+            try:
+                _, message = queue_flipkart_product_refresh(
+                    product=product,
+                    task=flipkart_product_extraction_task,
+                    user=request.user,
+                )
+                if message:
+                    skipped += 1
+                else:
+                    queued += 1
+            except Exception as exc:
+                skipped += 1
+                self.message_user(request, f"{product.pid}: unable to queue refresh: {exc}", level=messages.ERROR)
+        self.message_user(
+            request,
+            f"{queued} Flipkart product(s) queued for refresh. {skipped} skipped because extraction is already running or invalid.",
+            level=messages.WARNING if skipped else messages.SUCCESS,
+        )
 
     @admin.display(description="Publication")
     def publication_status(self, obj):
@@ -968,6 +1016,7 @@ class AmazonProductAdmin(ModelAdmin):
         "assign_categories",
         "search_flipkart",
         "extract_best_matched_flipkart_product",
+        "refresh_selected",
     )
     inlines = (FlipkartSearchResultInline, ProductMatchInline)
     list_select_related = ("published_product",)
@@ -1147,7 +1196,9 @@ class AmazonProductAdmin(ModelAdmin):
         self.message_user(request, "Selected Amazon products unpublished.", level=messages.SUCCESS)
 
     def response_change(self, request, obj):
-        if "_approve_product" in request.POST:
+        if "_refresh_product" in request.POST:
+            self._queue_refresh(request, obj)
+        elif "_approve_product" in request.POST:
             try:
                 approve_amazon_product(obj, request.user)
                 self.message_user(request, "Amazon product approved. It is still unpublished.")
@@ -1176,6 +1227,44 @@ class AmazonProductAdmin(ModelAdmin):
             except Exception as exc:
                 self.message_user(request, f"Flipkart search queue failed: {exc}", level=messages.ERROR)
         return super().response_change(request, obj)
+
+    def _queue_refresh(self, request, product):
+        try:
+            _, message = queue_amazon_product_refresh(
+                product=product,
+                task=amazon_product_extraction_task,
+                user=request.user,
+            )
+            self.message_user(
+                request,
+                message or "Amazon product refresh queued.",
+                level=messages.WARNING if message else messages.SUCCESS,
+            )
+        except Exception:
+            self.message_user(request, "Unable to queue refresh: an internal queue error occurred.", level=messages.ERROR)
+
+    @admin.action(description="Refresh selected Amazon products")
+    def refresh_selected(self, request, queryset):
+        queued = skipped = 0
+        for product in queryset.iterator(chunk_size=100):
+            try:
+                _, message = queue_amazon_product_refresh(
+                    product=product,
+                    task=amazon_product_extraction_task,
+                    user=request.user,
+                )
+                if message:
+                    skipped += 1
+                else:
+                    queued += 1
+            except Exception as exc:
+                skipped += 1
+                self.message_user(request, f"{product.asin}: unable to queue refresh: {exc}", level=messages.ERROR)
+        self.message_user(
+            request,
+            f"{queued} Amazon product(s) queued for refresh. {skipped} skipped because extraction is already running or invalid.",
+            level=messages.WARNING if skipped else messages.SUCCESS,
+        )
 
     @admin.action(description="Search Flipkart for selected products")
     def search_flipkart(self, request, queryset):

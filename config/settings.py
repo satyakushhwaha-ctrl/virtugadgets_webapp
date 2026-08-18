@@ -23,15 +23,21 @@ env.read_env(BASE_DIR / ".env")
 # fallback keeps local development convenient without embedding credentials.
 REDIS_URL = env("REDIS_URL", default="redis://127.0.0.1:6379/0")
 
-# Amazon search remains Playwright-first; ScrapingBee is only used as the
-# configured fallback when direct Amazon access is blocked or unavailable.
+# Existing marketplace provider settings remain unchanged in Phase 1.
 AMAZON_SEARCH_PROVIDER = env("AMAZON_SEARCH_PROVIDER", default="auto").lower()
 SCRAPINGBEE_API_KEY = env("SCRAPINGBEE_API_KEY", default="")
+SCRAPEDO_API_TOKEN = env("SCRAPEDO_API_TOKEN", default="")
+SCRAPEDO_TIMEOUT = env.int("SCRAPEDO_TIMEOUT", default=45)
+SCRAPEDO_TASK_SOFT_TIME_LIMIT = env.int("SCRAPEDO_TASK_SOFT_TIME_LIMIT", default=300)
+SCRAPEDO_TASK_TIME_LIMIT = env.int("SCRAPEDO_TASK_TIME_LIMIT", default=360)
 
 
 # Security
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
+
+if not DEBUG and not SCRAPEDO_API_TOKEN.strip():
+    raise RuntimeError("SCRAPEDO_API_TOKEN must be configured when DEBUG=False.")
 
 
 def _unique(values):
@@ -136,7 +142,10 @@ UNFOLD = {
     },
     "SIDEBAR": {
         "show_search": True,
-        "show_all_applications": False,
+        # Keep the curated operational navigation above, while also exposing
+        # every permission-checked registered app/model through Unfold's
+        # built-in All applications drawer.
+        "show_all_applications": True,
         "navigation": [
             {
                 "title": _("Dashboard"),

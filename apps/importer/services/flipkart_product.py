@@ -1,28 +1,79 @@
 """Flipkart product-detail extraction and persistence."""
 
+import logging
 import asyncio
 import inspect
 import re
+import time
 from decimal import Decimal
 from urllib.parse import urlparse
 
 from django.db import transaction
+from django.conf import settings
 from django.utils import timezone
 
 from ..models import FlipkartProduct, FlipkartSearchResult, ImportStatus
-from .flipkart_scraper import scrape_flipkart
+from .flipkart_scraper import parse_flipkart_product_html, scrape_flipkart
 from .jobs import concise_error_message
 
-
-def _run_scraper(url):
-    result = scrape_flipkart(url)
-    if inspect.isawaitable(result):
-        return asyncio.run(result)
-    return result
+logger = logging.getLogger(__name__)
 
 
 def extract_flipkart_product_data(url: str) -> dict:
+    """Fetch and parse one product, preferring Scrape.do when configured."""
+    extract_flipkart_product_data.last_provider_metadata = {}
+    if getattr(settings, "SCRAPEDO_API_TOKEN", "").strip():
+        from .scrapedo import ScrapeDoWebProvider
+
+        response = ScrapeDoWebProvider().fetch(url, render=True)
+        extract_flipkart_product_data.last_provider_metadata = {
+            "provider": response.provider,
+            "status_code": response.status_code,
+            "request_cost": response.request_cost,
+            "provider_duration_ms": response.duration_ms,
+        }
+        pid = (extract_flipkart_pid(url) or "unknown").upper()
+        html = response.html or ""
+        logger.info(
+            "[FLIPKART PRODUCT] pid=%s provider=%s status=%s html_length=%s request_cost=%s",
+            pid, response.provider, response.status_code, len(html), response.request_cost or "unknown",
+        )
+        block_reason = _flipkart_product_block_reason(html)
+        if block_reason:
+            logger.warning(
+                "[FLIPKART PRODUCT] pid=%s provider=%s page=blocked reason=%s",
+                pid, response.provider, block_reason,
+            )
+            raise ValueError(f"Flipkart product page is blocked: {block_reason}.")
+        parse_started = time.monotonic()
+        parsed = parse_flipkart_product_html(html, url)
+        extract_flipkart_product_data.last_provider_metadata["parse_duration_ms"] = max(0, round((time.monotonic() - parse_started) * 1000))
+        logger.info("[FLIPKART PRODUCT] pid=%s parser=success", pid)
+        return parsed
+    logger.warning(
+        "[FLIPKART PRODUCT] provider=scrapedo fallback=playwright reason=token_not_configured"
+    )
     return _run_scraper(url)
+
+
+def extract_flipkart_pid(url: str) -> str | None:
+    match = re.search(r"(?:[?&]pid=)([^&#]+)", url or "", re.I)
+    return match.group(1) if match else None
+
+
+def _flipkart_product_block_reason(raw_html: str) -> str | None:
+    content = (raw_html or "").lower()
+    for marker, reason in (
+        ("captcha", "captcha"),
+        ("robot check", "robot-check"),
+        ("access denied", "access-denied"),
+        ("verify you are human", "human-verification"),
+        ("login to continue", "login-page"),
+        ("unusual traffic", "unusual-traffic"),
+    ):
+        if marker in content:
+            return reason
+    return None
 
 
 def _nested(data, key, legacy_key=None):
@@ -76,7 +127,7 @@ def extract_flipkart_product(url: str) -> dict:
     specifications = _nested(raw, "specifications")
     legacy_pricing = pricing or raw
     price_range = _nested(pricing, "selling_price_range_inr")
-    return {
+    normalized = {
         "pid": _value(product, "pid", "sku", "id") or raw.get("pid", ""),
         "product_title": _value(product, "title", "product_title") or raw.get("product_title", ""),
         "brand": _value(product, "brand") or raw.get("brand", ""),
@@ -101,6 +152,13 @@ def extract_flipkart_product(url: str) -> dict:
         "software": _specification(specifications, "software"),
         "warranty": _specification(specifications, "warranty", "manufacturer warranty"),
     }
+    if not normalized["product_title"]:
+        raise ValueError("Flipkart product validation failed: title is missing.")
+    if not normalized["pid"]:
+        raise ValueError("Flipkart product validation failed: PID is missing.")
+    if not normalized["url"]:
+        raise ValueError("Flipkart product validation failed: product URL is missing.")
+    return normalized
 
 
 _EXTRACTED_FIELDS = (
@@ -142,9 +200,23 @@ def process_flipkart_search_result(search_result: FlipkartSearchResult) -> bool:
             product.save()
             search_result.processed = True
             search_result.save(update_fields=["processed"])
+        logger.info(
+            "[FLIPKART PRODUCT] pid=%s validation=passed title=%s identity=%s",
+            pid, bool(data.get("product_title")), bool(data.get("url")),
+        )
+        logger.info("[FLIPKART PRODUCT] pid=%s saved=true status=completed", pid)
     except Exception as exc:
+        logger.warning(
+            "[FLIPKART PRODUCT] pid=%s validation=failed reason=%s",
+            pid, concise_error_message(exc),
+        )
         product.status = ImportStatus.FAILED
         product.error_message = concise_error_message(exc)
         product.save(update_fields=["status", "error_message", "updated_at"])
         raise
     return True
+def _run_scraper(url):
+    result = scrape_flipkart(url)
+    if inspect.isawaitable(result):
+        return asyncio.run(result)
+    return result

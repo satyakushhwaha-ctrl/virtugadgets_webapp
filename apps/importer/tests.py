@@ -1520,7 +1520,7 @@ class AmazonSearchPaginationTests(TestCase):
         self.assertEqual(search_page.call_count, 5)
         self.assertEqual(summary.scraped_pages, 5)
         self.assertEqual(summary.available_pages, 5)
-        self.assertIn("only 5 available pages", summary.reason)
+        self.assertEqual(summary.reason, "Requested 10 pages, but only 5 pages were available.")
         self.assertEqual(keyword.amazon_results.count(), 5)
         keyword.refresh_from_db()
         self.assertEqual(keyword.status, ImportStatus.COMPLETED)
